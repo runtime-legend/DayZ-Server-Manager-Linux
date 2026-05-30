@@ -556,6 +556,19 @@ fn_clear_mods(){
         done
         printf "\n"
 
+        # First pass: collect every bikey filename actually shipped by an installed mod,
+        # so we only delete those from serverfiles/keys/ and leave official game keys
+        # (dayz.bikey, dayz_server.bikey, etc.) untouched.
+        local -a mod_keynames=()
+        if [ -d "$workshopfolder" ]; then
+            while IFS= read -r -d '' kdir; do
+                for keyfile in "$kdir"/*.bikey; do
+                    [ -f "$keyfile" ] || continue
+                    mod_keynames+=("$(basename "$keyfile")")
+                done
+            done < <(find "$workshopfolder" -type d \( -iname "keys" -o -iname "key" \) -print0 2>/dev/null)
+        fi
+
         # Remove every @symlink (and matching serverprofile config) under serverfiles.
         if [ -d "${HOME}/serverfiles" ]; then
             for link in "${HOME}/serverfiles"/@*; do
@@ -584,10 +597,17 @@ fn_clear_mods(){
             printf "[ ${green}OK${default} ] Cleared workshop content in ${workshopfolder}\n"
         fi
 
-        # Remove copied mod bikeys; keep dayz_server.bikey if the server uses one.
-        if [ -d "$keys_dir" ]; then
-            find "$keys_dir" -maxdepth 1 -type f -name "*.bikey" ! -name "dayz_server.bikey" -delete
-            printf "[ ${green}OK${default} ] Cleared mod keys from ${keys_dir}\n"
+        # Remove ONLY the bikeys that were collected from installed mods above.
+        # Official keys (dayz.bikey, dayz_server.bikey, etc.) are left in place.
+        if [ -d "$keys_dir" ] && [ ${#mod_keynames[@]} -gt 0 ]; then
+            local removed_keys=0
+            for keyname in "${mod_keynames[@]}"; do
+                if [ -f "${keys_dir}/${keyname}" ]; then
+                    rm -f "${keys_dir}/${keyname}"
+                    removed_keys=$((removed_keys + 1))
+                fi
+            done
+            printf "[ ${green}OK${default} ] Removed ${removed_keys} mod key(s) from ${keys_dir}\n"
         fi
 
         if [ -f "$workshop_cfg" ]; then
