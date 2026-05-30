@@ -15,3 +15,24 @@
 ![](https://edge-prodberiffagroup.b-cdn.net/web/dayzservermanagerheadlinegifsmall-revisedyellow.gif)
 
 DayZ Server Manager for Linux is a comprehensive and user-friendly script designed to automate server installation, updates, backups, and monitoring.
+
+### Alternative Cron Configuration
+
+If you prefer to handle scheduled restarts and updates directly through Cron instead of using messages.xml, you can use the following example:
+```
+@reboot /home/dayz/dayzserver.sh start > /dev/null 2>&1
+*/1 * * * * /home/dayz/dayzserver.sh monitor > /dev/null 2>&1
+0 */3 * * * /home/dayz/dayzserver.sh restart > /dev/null 2>&1
+0 4 * * * /home/dayz/dayzserver.sh u > /dev/null 2>&1
+# */30 * * * * /home/dayz/dayzserver.sh backup > /dev/null 2>&1
+```
+
+Explanation:
+
+* @reboot – Automatically starts the DayZ server when the system boots.
+* monitor – Runs every minute and restarts the server if it crashes or is shut down through supported restart methods.
+* restart – Performs a scheduled server restart every 3 hours.
+* u – Checks for and installs DayZ server and Workshop mod updates daily at 04:00.
+* backup – Optional periodic backup task (disabled by default).
+
+Replace /home/dayz/ with the actual home directory of the Linux user running the server.
