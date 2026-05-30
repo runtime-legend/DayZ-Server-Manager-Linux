@@ -372,28 +372,54 @@ fn_workshop_mods(){
 
         echo "[ INFO ] Downloading mod $mod_id"
 
+        local mod_meta_file="${workshopfolder}/${mod_id}/meta.cpp"
+        local steamcmd_log
+        steamcmd_log=$(mktemp -t steamcmd.XXXXXX.log) || steamcmd_log="${HOME}/.steamcmd_last.log"
+
         success=0
         for attempt in {1..5}; do
             echo "[ INFO ] Attempt $attempt for mod $mod_id"
 
+            : > "$steamcmd_log"
             ${HOME}/steamcmd/steamcmd.sh \
                 +force_install_dir ${HOME}/serverfiles \
                 +login "${steamlogin}" \
                 +workshop_download_item "${dayz_id}" "$mod_id" validate \
-                +quit
+                +quit 2>&1 | tee "$steamcmd_log"
 
-            if [ -d "${workshopfolder}/${mod_id}" ] && [ "$(ls -A "${workshopfolder}/${mod_id}" 2>/dev/null)" ]; then
+            # SteamCMD prints "Success. Downloaded item <id> to ..." only on a real success.
+            # A non-empty mod folder is NOT a reliable signal because timeouts leave partial
+            # content behind. Require BOTH the success line AND meta.cpp present.
+            if grep -q "Success\. Downloaded item ${mod_id}" "$steamcmd_log" && [ -f "$mod_meta_file" ]; then
                 echo "[ OK ] Mod $mod_id downloaded"
                 success=1
                 break
             fi
 
-            echo "[ WARN ] Failed attempt $attempt for mod $mod_id"
+            if grep -q "Timeout downloading item ${mod_id}" "$steamcmd_log"; then
+                echo "[ WARN ] SteamCMD timeout on attempt $attempt for mod $mod_id"
+            elif grep -qE "ERROR! .*${mod_id}" "$steamcmd_log"; then
+                echo "[ WARN ] SteamCMD reported an error on attempt $attempt for mod $mod_id"
+            else
+                echo "[ WARN ] Attempt $attempt incomplete for mod $mod_id (no meta.cpp)"
+            fi
+
+            # Wipe the partial folder so the next attempt starts from a clean state.
+            if [ -d "${workshopfolder}/${mod_id}" ]; then
+                rm -rf "${workshopfolder}/${mod_id}"
+            fi
+
             sleep 5
         done
 
+        rm -f "$steamcmd_log"
+
         if [ "$success" -ne 1 ]; then
             echo "[ ERROR ] Failed to download mod $mod_id after 5 attempts"
+            # Drop any partial folder left behind so we don't symlink to garbage on the next pass.
+            if [ -d "${workshopfolder}/${mod_id}" ]; then
+                rm -rf "${workshopfolder}/${mod_id}"
+            fi
             # Preserve the existing cfg line so we don't lose a user-provided name.
             updated_workshop_cfg+="${mod_id}${mod_name_from_cfg:+ }${mod_name_from_cfg}"$'\n'
             continue
