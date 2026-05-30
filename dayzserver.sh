@@ -484,26 +484,205 @@ fn_workshop_mods(){
     done | sort
     echo "----------------------------------------"
 
-    # Budowanie linii startowej - czytamy nazwę z pliku i dodajemy do niej @
-    local mod_line=""
-    while read -r line; do
-        [ -z "$line" ] && continue
-        local name_part=$(echo "$line" | cut -d' ' -f2-)
-        [ -z "$name_part" ] && continue
-        [ "$name_part" = "$(echo "$line" | awk '{print $1}')" ] && continue
-
-        if [ -z "$mod_line" ]; then
-            mod_line="@${name_part}"
-        else
-            mod_line="${mod_line};@${name_part}"
-        fi
-    done < "$workshop_cfg"
-
-    echo "[ DayZ ] Gotowa linia modów do config.ini (workshop=\"...\"):"
-    echo -e "${mod_line}"
-    echo "----------------------------------------"
+    fn_update_workshop_line
 
     echo "[ OK ] Workshop mods done"
+}
+
+# Build the workshop="@..." line from workshop.cfg and write it into config.ini,
+# replacing any existing (commented or uncommented) workshop= line.
+fn_update_workshop_line(){
+    local workshop_cfg="${HOME}/workshop.cfg"
+    local config_file="${CONFIG_FILE}"
+
+    if [ ! -f "$config_file" ]; then
+        printf "[ ${yellow}WARN${default} ] Config file ${config_file} not found - cannot update workshop line.\n"
+        return 1
+    fi
+
+    local mod_line=""
+    if [ -f "$workshop_cfg" ]; then
+        while read -r line; do
+            line=$(echo "$line" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+            [ -z "$line" ] && continue
+
+            local mod_id_part name_part
+            mod_id_part=$(echo "$line" | awk '{print $1}')
+            name_part=$(echo "$line" | cut -d' ' -f2-)
+
+            # Skip lines without a resolved mod name.
+            [ -z "$name_part" ] && continue
+            [ "$name_part" = "$mod_id_part" ] && continue
+
+            if [ -z "$mod_line" ]; then
+                mod_line="@${name_part}"
+            else
+                mod_line="${mod_line};@${name_part}"
+            fi
+        done < "$workshop_cfg"
+    fi
+
+    # Replace any existing workshop= line (with or without leading #), otherwise append one.
+    if grep -qE '^[[:space:]]*#?[[:space:]]*workshop[[:space:]]*=' "$config_file"; then
+        # Use | as sed delimiter so @ and ; in the value don't conflict.
+        sed -i.bak -E "s|^[[:space:]]*#?[[:space:]]*workshop[[:space:]]*=.*|workshop=\"${mod_line}\"|" "$config_file"
+        rm -f "${config_file}.bak"
+        printf "[ ${green}OK${default} ] Updated workshop= line in ${config_file}\n"
+    else
+        printf 'workshop="%s"\n' "$mod_line" >> "$config_file"
+        printf "[ ${green}OK${default} ] Added workshop= line to ${config_file}\n"
+    fi
+
+    printf "[ ${cyan}INFO${default} ] workshop=\"${green}${mod_line}${default}\"\n"
+}
+
+# Remove all installed mods, or a single mod identified by id or @name.
+# Cleans: workshop content folder, @symlink in serverfiles, copied bikeys,
+# serverprofile/@<name> config folder, and the workshop.cfg entry.
+# Then re-syncs the workshop= line in config.ini.
+fn_clear_mods(){
+    local target="$1"
+    local workshopfolder="${HOME}/serverfiles/steamapps/workshop/content/${dayz_id}"
+    local workshop_cfg="${HOME}/workshop.cfg"
+    local profiles_dir="${HOME}/serverprofile"
+    local keys_dir="${HOME}/serverfiles/keys"
+    local timestamp_file="${HOME}/mod_timestamps.json"
+
+    if [ -z "$target" ]; then
+        printf "[ ${red}WARNING${default} ] This will remove ALL installed mods (workshop content, symlinks, keys, profile configs).\n"
+        for seconds in {5..1}; do
+            printf "\r\tProceeding in ${red}${seconds}${default} seconds... (Ctrl+C to cancel)"
+            sleep 1
+        done
+        printf "\n"
+
+        # Remove every @symlink (and matching serverprofile config) under serverfiles.
+        if [ -d "${HOME}/serverfiles" ]; then
+            for link in "${HOME}/serverfiles"/@*; do
+                [ -e "$link" ] || [ -L "$link" ] || continue
+                local link_name
+                link_name=$(basename "$link")
+                local bare_name="${link_name#@}"
+
+                if [ -d "${profiles_dir}/${link_name}" ]; then
+                    rm -rf "${profiles_dir}/${link_name}"
+                    printf "[ ${green}OK${default} ] Removed profile config: ${profiles_dir}/${link_name}\n"
+                fi
+                if [ -d "${profiles_dir}/${bare_name}" ]; then
+                    rm -rf "${profiles_dir}/${bare_name}"
+                    printf "[ ${green}OK${default} ] Removed profile config: ${profiles_dir}/${bare_name}\n"
+                fi
+
+                rm -rf "$link"
+                printf "[ ${green}OK${default} ] Removed: ${link}\n"
+            done
+        fi
+
+        # Wipe downloaded workshop content for this app.
+        if [ -d "$workshopfolder" ]; then
+            rm -rf "${workshopfolder:?}"/*
+            printf "[ ${green}OK${default} ] Cleared workshop content in ${workshopfolder}\n"
+        fi
+
+        # Remove copied mod bikeys; keep dayz_server.bikey if the server uses one.
+        if [ -d "$keys_dir" ]; then
+            find "$keys_dir" -maxdepth 1 -type f -name "*.bikey" ! -name "dayz_server.bikey" -delete
+            printf "[ ${green}OK${default} ] Cleared mod keys from ${keys_dir}\n"
+        fi
+
+        if [ -f "$workshop_cfg" ]; then
+            : > "$workshop_cfg"
+            printf "[ ${green}OK${default} ] Cleared workshop.cfg\n"
+        fi
+
+        if [ -f "$timestamp_file" ]; then
+            echo "{}" > "$timestamp_file"
+        fi
+
+        fn_update_workshop_line
+        printf "[ ${green}DayZ${default} ] All mods removed.\n"
+        return 0
+    fi
+
+    # ----- Single-mod removal -----
+    local mod_id=""
+    local mod_name=""
+
+    if [[ "$target" =~ ^[0-9]+$ ]]; then
+        mod_id="$target"
+        if [ -f "$workshop_cfg" ]; then
+            mod_name=$(grep -E "^[[:space:]]*${mod_id}([[:space:]]|$)" "$workshop_cfg" \
+                | head -n1 \
+                | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' \
+                | cut -d' ' -f2-)
+            [ "$mod_name" = "$mod_id" ] && mod_name=""
+        fi
+    else
+        mod_name="${target#@}"
+        if [ -f "$workshop_cfg" ]; then
+            mod_id=$(grep -E "[[:space:]]${mod_name}[[:space:]]*$" "$workshop_cfg" \
+                | head -n1 \
+                | awk '{print $1}')
+        fi
+    fi
+
+    if [ -z "$mod_id" ] && [ -z "$mod_name" ]; then
+        printf "[ ${red}ERROR${default} ] Mod '${target}' not found in workshop.cfg.\n"
+        exit 1
+    fi
+
+    printf "[ ${magenta}...${default} ] Removing mod: id='${mod_id:-?}' name='${mod_name:-?}'\n"
+
+    # Capture and delete the mod's keys (must happen before we rm the mod folder).
+    if [ -n "$mod_id" ] && [ -d "${workshopfolder}/${mod_id}" ]; then
+        local mod_keys_dir
+        mod_keys_dir=$(find "${workshopfolder}/${mod_id}" -type d \( -iname "keys" -o -iname "key" \) 2>/dev/null | head -n1)
+        if [ -n "$mod_keys_dir" ] && [ -d "$mod_keys_dir" ]; then
+            for keyfile in "$mod_keys_dir"/*.bikey; do
+                [ -f "$keyfile" ] || continue
+                local keyname
+                keyname=$(basename "$keyfile")
+                if [ -f "${keys_dir}/${keyname}" ]; then
+                    rm -f "${keys_dir}/${keyname}"
+                    printf "[ ${green}OK${default} ] Removed key: ${keyname}\n"
+                fi
+            done
+        fi
+
+        rm -rf "${workshopfolder}/${mod_id}"
+        printf "[ ${green}OK${default} ] Removed mod folder: ${workshopfolder}/${mod_id}\n"
+    fi
+
+    if [ -n "$mod_name" ]; then
+        local link="${HOME}/serverfiles/@${mod_name}"
+        if [ -L "$link" ] || [ -e "$link" ]; then
+            rm -rf "$link"
+            printf "[ ${green}OK${default} ] Removed: ${link}\n"
+        fi
+
+        if [ -d "${profiles_dir}/@${mod_name}" ]; then
+            rm -rf "${profiles_dir}/@${mod_name}"
+            printf "[ ${green}OK${default} ] Removed profile config: ${profiles_dir}/@${mod_name}\n"
+        fi
+        if [ -d "${profiles_dir}/${mod_name}" ]; then
+            rm -rf "${profiles_dir}/${mod_name}"
+            printf "[ ${green}OK${default} ] Removed profile config: ${profiles_dir}/${mod_name}\n"
+        fi
+    fi
+
+    if [ -n "$mod_id" ] && [ -f "$timestamp_file" ]; then
+        jq --arg mod "$mod_id" 'del(.[$mod])' "$timestamp_file" > "${timestamp_file}.tmp" \
+            && mv "${timestamp_file}.tmp" "$timestamp_file"
+    fi
+
+    if [ -n "$mod_id" ] && [ -f "$workshop_cfg" ]; then
+        sed -i.bak -E "/^[[:space:]]*${mod_id}([[:space:]]|$)/d" "$workshop_cfg"
+        rm -f "${workshop_cfg}.bak"
+        printf "[ ${green}OK${default} ] Removed ${mod_id} from workshop.cfg\n"
+    fi
+
+    fn_update_workshop_line
+    printf "[ ${green}DayZ${default} ] Mod removal complete.\n"
 }
 
 
@@ -590,9 +769,10 @@ cmd_workshop=( "ws;workshop" "fn_workshop_mods" "Download Mods from Steam Worksh
 cmd_backup=( "b;backup" "fn_backup_dayz" "Create backup archives of the server (mpmission)." )
 cmd_wipe=( "wi;wipe" "fn_wipe_dayz" "Wipe your server data (Player and Storage)." )
 cmd_clean=( "cl;clean" "fn_clean_dayz" "Clear SteamCMD / workshop caches." )
+cmd_clearmods=( "cm;clearmods" "fn_clear_mods" "Remove all mods, or a specific one: cm [mod_id|@name]." )
 
 ### Set specific opt here ###
-currentopt=( "${cmd_start[@]}" "${cmd_stop[@]}" "${cmd_restart[@]}" "${cmd_monitor[@]}" "${cmd_console[@]}" "${cmd_install[@]}" "${cmd_update[@]}" "${cmd_validate[@]}" "${cmd_workshop[@]}" "${cmd_backup[@]}" "${cmd_wipe[@]}" "${cmd_clean[@]}" )
+currentopt=( "${cmd_start[@]}" "${cmd_stop[@]}" "${cmd_restart[@]}" "${cmd_monitor[@]}" "${cmd_console[@]}" "${cmd_install[@]}" "${cmd_update[@]}" "${cmd_validate[@]}" "${cmd_workshop[@]}" "${cmd_backup[@]}" "${cmd_wipe[@]}" "${cmd_clean[@]}" "${cmd_clearmods[@]}" )
 
 ### Build list of available commands
 optcommands=()
@@ -652,8 +832,8 @@ for i in "${optcommands[@]}"; do
 			currcmdamount="$(echo "${currentopt[index]}" | awk -F ';' '{ print NF }')"
 			for ((currcmdindex=1; currcmdindex <= ${currcmdamount}; currcmdindex++)); do
 				if [ "$(echo "${currentopt[index]}" | awk -F ';' -v x=${currcmdindex} '{ print $x }')" == "${getopt}" ]; then
-					# Run command
-					eval "${currentopt[index+1]}"
+					# Run command (forward $2 so commands like `cm <mod>` receive their target)
+					"${currentopt[index+1]}" "${2:-}"
                                         exit 1
 					break
 				fi
