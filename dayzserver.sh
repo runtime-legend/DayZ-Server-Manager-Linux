@@ -1,11 +1,11 @@
 #!/bin/bash
 
 #=======================================================================================#
-#     Authors:  @fiskce / @tootlejack / @thelastnoc / @haywardgg         Date: 28/11/2024                                                             
+#     Authors:  @fiskce / @tootlejack / @thelastnoc / @haywardgg         Date: 28/11/2024
 #=======================================================================================#
-#                                                                                    
-#                       DayZ Standalone Linux Server Manager                        
-#                                                                                                                                                            
+#
+#                       DayZ Standalone Linux Server Manager
+#
 #=======================================================================================#
 
 ### NO NEED TO EDIT ANYTHING IN THIS FILE ###
@@ -95,21 +95,21 @@ check_dependencies(){
 	    missing_tools=()
 	    tools=("tmux" "curl" "jq" "wget")
 	    libraries=("lib32gcc-s1")
-	
+
 	    # Check executables
 	    for tool in "${tools[@]}"; do
 	        if ! command -v "$tool" &>/dev/null; then
 	            missing_tools+=("$tool")
 	        fi
 	    done
-	
+
 	    # Check libraries
 	    for lib in "${libraries[@]}"; do
 	        if ! dpkg -l | grep -q "$lib"; then
 	            missing_tools+=("$lib")
 	        fi
 	    done
-	
+
 	    if [ "${#missing_tools[@]}" -ne 0 ]; then
 	        echo -e "[ ${red}ERROR${default} ] The following dependencie(s) are missing and must be installed:"
 	        for tool in "${missing_tools[@]}"; do
@@ -156,9 +156,10 @@ fn_start_dayz(){
 		exit 1
 	else
                 fn_backup_dayz
-                fn_update_dayz
-                fn_workshop_mods
-		fn_clear_logs
+                # fn_update_dayz and fn_workshop_mods moved to the dedicated `u` / `ws`
+                # commands so start/restart paths stay fast and have no Steam dependency.
+                # Run `./dayzserver.sh u` manually or via a daily cron to apply updates.
+                fn_clear_logs
 		printf "[ ${green}DayZ${default} ] Starting server...\n"
 		sleep 0.5
 		sleep 0.5
@@ -336,122 +337,173 @@ fn_validate_dayz(){
 
 fn_workshop_mods(){
     declare -a workshopID
-    workshopfolder="${HOME}/serverfiles/steamapps/workshop/content/221100"
-    workshoplist=""
-    timestamp_file="${HOME}/mod_timestamps.json"
+    workshopfolder="${HOME}/serverfiles/steamapps/workshop/content/${dayz_id}"
     workshop_cfg="${HOME}/workshop.cfg"
-    
-    # If .workshop.cfg doesn't exist, create it.
+    timestamp_file="${HOME}/mod_timestamps.json"
+
     if [ ! -f "$workshop_cfg" ]; then
-        touch $workshop_cfg
-	chmod 600 ${HOME}/workshop.cfg
+        touch "$workshop_cfg"
+        chmod 600 "$workshop_cfg"
     fi
 
-    # Read the updated workshop.cfg into workshopID array
-    mapfile -t workshopID < "$workshop_cfg"
-
-    # Initialize timestamp file if it doesn't exist
     if [ ! -f "$timestamp_file" ]; then
         echo "{}" > "$timestamp_file"
-        echo "Timestamp file '$timestamp_file' created."
     fi
 
-    # Gather mods for download
+    mapfile -t workshopID < "$workshop_cfg"
+
+    echo "[ DayZ ] Downloading workshop mods..."
+
+    local updated_workshop_cfg=""
+
     for i in "${workshopID[@]}"; do
+        # Strip surrounding whitespace; skip empty lines.
+        i=$(echo "$i" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+        [ -z "$i" ] && continue
+
         mod_id=$(echo "$i" | awk '{print $1}')
-        if [[ "$mod_id" =~ ^[0-9]+$ ]]; then
-            workshoplist+=" +workshop_download_item "${dayz_id}" "$mod_id""
-        fi
-    done
+        mod_name_from_cfg=$(echo "$i" | cut -d' ' -f2- | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+        # cut -f2- on a single-token line returns the whole token; treat that as no name.
+        [ "$mod_name_from_cfg" = "$mod_id" ] && mod_name_from_cfg=""
 
-    # Download mods
-    ${HOME}/steamcmd/steamcmd.sh +force_install_dir ${HOME}/serverfiles +login "${steamlogin}" ${workshoplist} +quit
-
-    # Link mods and check for updates
-    for i in "${workshopID[@]}"; do
-        mod_id=$(echo "$i" | awk '{print $1}')
-        mod_name=$(echo "$i" | cut -d' ' -f2-)
-
-        if [[ "$mod_id" =~ ^[0-9]+$ ]] && [ -d "${workshopfolder}/$mod_id" ]; then
-            mod_meta_file="${workshopfolder}/$mod_id/meta.cpp"
-            
-            # Ensure mod_name is accurate
-            if [ -f "$mod_meta_file" ]; then
-                actual_mod_name=$(cut -d '"' -f 2 <<< $(grep name "$mod_meta_file"))
-                mod_name=${actual_mod_name:-$mod_name}
-            fi
-
-            # Convert modname to lowercase
-            mod_name=$(echo "${mod_name}" | tr '[:upper:]' '[:lower:]')
-
-            # Rename main mod folder to lowercase if necessary
-            if [ ! -d "${HOME}/serverfiles/@${mod_name}" ]; then
-                mv "${HOME}/serverfiles/@$(basename "${workshopfolder}/$mod_id")" "${HOME}/serverfiles/@${mod_name}" 2>/dev/null
-            fi
-
-            # Create a symlink if it doesn't already exist
-            if [ ! -d "${HOME}/serverfiles/@${mod_name}" ]; then
-                ln -s ${workshopfolder}/$mod_id "${HOME}/serverfiles/@${mod_name}" &> /dev/null
-            fi
-
-            # Check if mod has been updated
-            mod_last_modified=$(date -r "$mod_meta_file" +%s 2>/dev/null || echo 0)
-            prev_timestamp=$(jq -r --arg mod "$mod_id" '.[$mod] // 0' "$timestamp_file")
-
-            if [ "$mod_last_modified" -gt "$prev_timestamp" ]; then
-                # Send Discord notification if URL is set
-                if [ -n "$discord_webhook_url" ]; then
-                    curl -H "Content-Type: application/json" -X POST -d "{\"content\": \"The mod '$mod_name' (ID: $mod_id) has been updated.\"}" "$discord_webhook_url"
-                else
-                    echo "Discord webhook URL is not set. Skipping notification for mod '$mod_name'."
-                fi
-                
-                # Update timestamp file
-                jq --arg mod "$mod_id" --argjson time "$mod_last_modified" '.[$mod] = $time' "$timestamp_file" > "${timestamp_file}.tmp" && mv "${timestamp_file}.tmp" "$timestamp_file"
-            fi
-        fi
-    done
-
-    # Parse and update workshop.cfg with mod names
-    while IFS= read -r line; do
-        # Extract mod ID and name (if present)
-        mod_id=$(echo "$line" | awk '{print $1}')
-        mod_name=$(echo "$line" | cut -d' ' -f2-)
-
-        # Skip invalid lines
         if [[ ! "$mod_id" =~ ^[0-9]+$ ]]; then
             continue
         fi
 
-        # Get mod name from meta.cpp if not present
-        if [[ -z "$mod_name" || "$mod_name" == "$mod_id" ]]; then
-            mod_meta_file="${workshopfolder}/$mod_id/meta.cpp"
-            if [ -f "$mod_meta_file" ]; then
-                mod_name=$(cut -d '"' -f 2 <<< $(grep name "$mod_meta_file"))
-            else
-                mod_name="Unknown"
+        echo "[ INFO ] Downloading mod $mod_id"
+
+        success=0
+        for attempt in {1..5}; do
+            echo "[ INFO ] Attempt $attempt for mod $mod_id"
+
+            ${HOME}/steamcmd/steamcmd.sh \
+                +force_install_dir ${HOME}/serverfiles \
+                +login "${steamlogin}" \
+                +workshop_download_item "${dayz_id}" "$mod_id" validate \
+                +quit
+
+            if [ -d "${workshopfolder}/${mod_id}" ] && [ "$(ls -A "${workshopfolder}/${mod_id}" 2>/dev/null)" ]; then
+                echo "[ OK ] Mod $mod_id downloaded"
+                success=1
+                break
             fi
+
+            echo "[ WARN ] Failed attempt $attempt for mod $mod_id"
+            sleep 5
+        done
+
+        if [ "$success" -ne 1 ]; then
+            echo "[ ERROR ] Failed to download mod $mod_id after 5 attempts"
+            # Preserve the existing cfg line so we don't lose a user-provided name.
+            updated_workshop_cfg+="${mod_id}${mod_name_from_cfg:+ }${mod_name_from_cfg}"$'\n'
+            continue
         fi
 
-	# Save the updated line
-        updated_workshop_cfg+="${mod_id} ${mod_name}"$'\n'
-    done < "$workshop_cfg"
+        # Resolve the mod's display name. Priority: meta.cpp > workshop.cfg > bare mod_id.
+        local mod_meta_file="${workshopfolder}/$mod_id/meta.cpp"
+        local resolved_name=""
 
-    # Rewrite workshop.cfg if necessary
+        if [ -f "$mod_meta_file" ]; then
+            # Anchor on a real `name = "..."` field to avoid matches like `title = "...Name..."`.
+            resolved_name=$(grep -E '^[[:space:]]*name[[:space:]]*=' "$mod_meta_file" | head -n1 | cut -d '"' -f 2)
+        fi
+
+        if [ -z "$resolved_name" ]; then
+            resolved_name="$mod_name_from_cfg"
+        fi
+
+        if [ -z "$resolved_name" ]; then
+            # Last-resort fallback: use the mod id as the name so the symlink is `@<id>`
+            # (functional, just not pretty). Loud warning so it's obvious in logs.
+            resolved_name="$mod_id"
+            echo "[ WARN ] No name from meta.cpp or workshop.cfg for mod $mod_id; using bare id"
+        fi
+
+		# Lowercase + replace spaces for the symlink path.
+        local mod_link_name
+		mod_link_name=$(echo "$resolved_name" | tr '[:upper:]' '[:lower:]' | sed -e 's/ /-/g' -e 's/---*/-/g')
+        local desired_link="${HOME}/serverfiles/@${mod_link_name}"
+
+        # Clean up any stale symlinks pointing to this mod's folder under a different name
+        # (e.g. a previous run created `@mod_<id>` because meta.cpp was unavailable, or
+        # the mod author renamed the mod since the last run).
+        for stale in ${HOME}/serverfiles/@*; do
+            [ -L "$stale" ] || continue
+            [ "$(readlink "$stale")" = "${workshopfolder}/${mod_id}" ] || continue
+            if [ "$stale" != "$desired_link" ]; then
+                echo "[ INFO ] Removing stale symlink: $(basename "$stale")"
+                rm "$stale"
+            fi
+        done
+
+        if [ ! -L "$desired_link" ]; then
+            ln -s "${workshopfolder}/${mod_id}" "$desired_link"
+            echo "[ OK ] Linked @${mod_link_name}"
+        fi
+
+        # Detect updates via meta.cpp mtime; notify Discord on actual upgrades only.
+        if [ -f "$mod_meta_file" ]; then
+            local mod_last_modified prev_timestamp
+            mod_last_modified=$(date -r "$mod_meta_file" +%s 2>/dev/null || echo 0)
+            prev_timestamp=$(jq -r --arg mod "$mod_id" '.[$mod] // 0' "$timestamp_file" 2>/dev/null || echo 0)
+
+            # Only notify when we have a previous baseline (avoids first-run spam).
+            if [ "$mod_last_modified" -gt "$prev_timestamp" ] && [ "$prev_timestamp" -gt 0 ]; then
+                if [ -n "$discord_webhook_url" ]; then
+                    curl -sS -H "Content-Type: application/json" -X POST \
+                        -d "{\"content\": \"Mod '${resolved_name}' (ID: ${mod_id}) has been updated.\"}" \
+                        "$discord_webhook_url" >/dev/null || true
+                fi
+            fi
+
+            # Always update the recorded timestamp so future runs detect future changes.
+            jq --arg mod "$mod_id" --argjson time "$mod_last_modified" \
+                '.[$mod] = $time' "$timestamp_file" > "${timestamp_file}.tmp" \
+                && mv "${timestamp_file}.tmp" "$timestamp_file"
+        fi
+
+        updated_workshop_cfg+="${mod_id} ${mod_link_name}"$'\n'
+    done
+
+	# Write resolved names back so subsequent runs can use them as a fallback.
     if [ -n "$updated_workshop_cfg" ]; then
-        echo "$updated_workshop_cfg" > "$workshop_cfg"
-        echo "Updated workshop.cfg with mod names."
+        printf "%s" "$updated_workshop_cfg" > "$workshop_cfg"
+        echo "[ OK ] Updated workshop.cfg with mod names"
     fi
 
- 	# Copy key files
-	if ls ${HOME}/serverfiles/@* 1> /dev/null 2>&1; then
-	    printf "\n[ ${green}DayZ${default} ] Copying Mod Keys to Server Keys folder...\n"
-	    for keydir in ${HOME}/serverfiles/@*/[Kk]eys/ ${HOME}/serverfiles/@*/[Kk]ey/; do
-	        if [ -d "$keydir" ]; then
-	            cp -vu "$keydir"* "${HOME}/serverfiles/keys/" > /dev/null 2>&1
-	        fi
-	    done
-	fi
+    # Copy keys (handles paths containing spaces).
+    echo "[ DayZ ] Copying keys..."
+    find ${HOME}/serverfiles -type d \( -iname "keys" -o -iname "key" \) | while read -r dir; do
+        cp -vu "$dir"/*.bikey "${HOME}/serverfiles/keys/" 2>/dev/null
+    done
+
+    echo "[ DayZ ] Aktualna lista modów:"
+    echo "----------------------------------------"
+    for link in "${HOME}/serverfiles"/@*; do
+        [ -L "$link" ] && basename "$link"
+    done | sort
+    echo "----------------------------------------"
+
+    # Budowanie linii startowej - czytamy nazwę z pliku i dodajemy do niej @
+    local mod_line=""
+    while read -r line; do
+        [ -z "$line" ] && continue
+        local name_part=$(echo "$line" | cut -d' ' -f2-)
+        [ -z "$name_part" ] && continue
+        [ "$name_part" = "$(echo "$line" | awk '{print $1}')" ] && continue
+
+        if [ -z "$mod_line" ]; then
+            mod_line="@${name_part}"
+        else
+            mod_line="${mod_line};@${name_part}"
+        fi
+    done < "$workshop_cfg"
+
+    echo "[ DayZ ] Gotowa linia modów do config.ini (workshop=\"...\"):"
+    echo -e "${mod_line}"
+    echo "----------------------------------------"
+
+    echo "[ OK ] Workshop mods done"
 }
 
 
@@ -476,7 +528,7 @@ fn_backup_dayz(){
         tar -cf "$backup_file" -C "${HOME}/serverfiles/mpmissions" "${missionfolder}"
 	    # Backup the serverprofile directory while excluding .log and .RPT files
 	    printf "[ ${green}DayZ${default} ] Creating backup of Serverprofile directory: ${cyan}${HOME}/serverprofile${default}\n"
-	    tar --exclude='*.log' --exclude='*.RPT' -cf "$profile_backup_file" -C "${HOME}" "serverprofile"      	
+	    tar --exclude='*.log' --exclude='*.RPT' -cf "$profile_backup_file" -C "${HOME}" "serverprofile"
     else
         fn_stop_dayz
         fn_start_dayz
@@ -511,6 +563,21 @@ fn_wipe_dayz(){
 	fi
 }
 
+fn_clean_dayz(){
+	printf "[ ${magenta}...${default} ] Clearing SteamCMD / workshop caches...\n"
+
+	rm -rf "${HOME}/Steam/appcache"
+	printf "[ ${green}OK${default} ] Removed ${HOME}/Steam/appcache\n"
+
+	rm -rf "${HOME}/serverfiles/steamapps/downloading"
+	printf "[ ${green}OK${default} ] Removed ${HOME}/serverfiles/steamapps/downloading\n"
+
+	rm -f "${HOME}/serverfiles/steamapps/workshop/appworkshop_${dayz_id}.acf"
+	printf "[ ${green}OK${default} ] Removed ${HOME}/serverfiles/steamapps/workshop/appworkshop_${dayz_id}.acf\n"
+
+	printf "[ ${green}DayZ${default} ] Cache cleared.\n"
+}
+
 cmd_start=( "st;start" "fn_start_dayz" "Start the server." )
 cmd_stop=( "sp;stop" "fn_stop_dayz" "Stop the server." )
 cmd_restart=( "r;restart" "fn_restart_dayz" "Restart the server.")
@@ -522,9 +589,10 @@ cmd_validate=( "v;validate" "fn_validate_dayz" "Validate server files with Steam
 cmd_workshop=( "ws;workshop" "fn_workshop_mods" "Download Mods from Steam Workshop." )
 cmd_backup=( "b;backup" "fn_backup_dayz" "Create backup archives of the server (mpmission)." )
 cmd_wipe=( "wi;wipe" "fn_wipe_dayz" "Wipe your server data (Player and Storage)." )
+cmd_clean=( "cl;clean" "fn_clean_dayz" "Clear SteamCMD / workshop caches." )
 
 ### Set specific opt here ###
-currentopt=( "${cmd_start[@]}" "${cmd_stop[@]}" "${cmd_restart[@]}" "${cmd_monitor[@]}" "${cmd_console[@]}" "${cmd_install[@]}" "${cmd_update[@]}" "${cmd_validate[@]}" "${cmd_workshop[@]}" "${cmd_backup[@]}" "${cmd_wipe[@]}" )
+currentopt=( "${cmd_start[@]}" "${cmd_stop[@]}" "${cmd_restart[@]}" "${cmd_monitor[@]}" "${cmd_console[@]}" "${cmd_install[@]}" "${cmd_update[@]}" "${cmd_validate[@]}" "${cmd_workshop[@]}" "${cmd_backup[@]}" "${cmd_wipe[@]}" "${cmd_clean[@]}" )
 
 ### Build list of available commands
 optcommands=()
