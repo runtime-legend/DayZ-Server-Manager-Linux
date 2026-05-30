@@ -477,7 +477,7 @@ fn_workshop_mods(){
         cp -vu "$dir"/*.bikey "${HOME}/serverfiles/keys/" 2>/dev/null
     done
 
-    echo "[ DayZ ] Aktualna lista modów:"
+    echo "[ DayZ ] Current mod list:"
     echo "----------------------------------------"
     for link in "${HOME}/serverfiles"/@*; do
         [ -L "$link" ] && basename "$link"
