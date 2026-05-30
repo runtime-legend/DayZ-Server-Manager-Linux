@@ -562,173 +562,87 @@ fn_update_workshop_line(){
     printf "[ ${cyan}INFO${default} ] workshop=\"${green}${mod_line}${default}\"\n"
 }
 
-# Remove all installed mods, or a single mod identified by id or @name.
-# Cleans: workshop content folder, @symlink in serverfiles, copied bikeys,
-# serverprofile/@<name> config folder, and the workshop.cfg entry.
-# Then re-syncs the workshop= line in config.ini.
+# Remove ALL installed mods and wipe player/storage data.
+# Cleans: workshop content folder, @symlinks in serverfiles, mod-shipped bikeys,
+# workshop.cfg, mod_timestamps.json, the workshop= line in config.ini, and finally
+# runs the player/CE wipe. serverprofile is intentionally left alone — there is no
+# reliable way to map a mod to the folder name it picks under serverprofile/.
+# DESTRUCTIVE — intended for fresh setup, not running production servers.
 fn_clear_mods(){
-    local target="$1"
     local workshopfolder="${HOME}/serverfiles/steamapps/workshop/content/${dayz_id}"
     local workshop_cfg="${HOME}/workshop.cfg"
-    local profiles_dir="${HOME}/serverprofile"
     local keys_dir="${HOME}/serverfiles/keys"
     local timestamp_file="${HOME}/mod_timestamps.json"
 
-    if [ -z "$target" ]; then
-        printf "[ ${red}WARNING${default} ] This will remove ALL installed mods (workshop content, symlinks, keys, profile configs).\n"
-        for seconds in {5..1}; do
-            printf "\r\tProceeding in ${red}${seconds}${default} seconds... (Ctrl+C to cancel)"
-            sleep 1
-        done
-        printf "\n"
+    printf "[ ${red}WARNING${default} ] This will remove ALL installed mods AND wipe player/storage data.\n"
+    printf "[ ${red}WARNING${default} ] Intended for initial setup only. Do NOT run on a live/production server.\n"
+    for seconds in {5..1}; do
+        printf "\r\tProceeding in ${red}${seconds}${default} seconds... (Ctrl+C to cancel)"
+        sleep 1
+    done
+    printf "\n"
 
-        # First pass: collect every bikey filename actually shipped by an installed mod,
-        # so we only delete those from serverfiles/keys/ and leave official game keys
-        # (dayz.bikey, dayz_server.bikey, etc.) untouched.
-        local -a mod_keynames=()
-        if [ -d "$workshopfolder" ]; then
-            while IFS= read -r -d '' kdir; do
-                for keyfile in "$kdir"/*.bikey; do
-                    [ -f "$keyfile" ] || continue
-                    mod_keynames+=("$(basename "$keyfile")")
-                done
-            done < <(find "$workshopfolder" -type d \( -iname "keys" -o -iname "key" \) -print0 2>/dev/null)
-        fi
-
-        # Remove every @symlink (and matching serverprofile config) under serverfiles.
-        if [ -d "${HOME}/serverfiles" ]; then
-            for link in "${HOME}/serverfiles"/@*; do
-                [ -e "$link" ] || [ -L "$link" ] || continue
-                local link_name
-                link_name=$(basename "$link")
-                local bare_name="${link_name#@}"
-
-                if [ -d "${profiles_dir}/${link_name}" ]; then
-                    rm -rf "${profiles_dir}/${link_name}"
-                    printf "[ ${green}OK${default} ] Removed profile config: ${profiles_dir}/${link_name}\n"
-                fi
-                if [ -d "${profiles_dir}/${bare_name}" ]; then
-                    rm -rf "${profiles_dir}/${bare_name}"
-                    printf "[ ${green}OK${default} ] Removed profile config: ${profiles_dir}/${bare_name}\n"
-                fi
-
-                rm -rf "$link"
-                printf "[ ${green}OK${default} ] Removed: ${link}\n"
-            done
-        fi
-
-        # Wipe downloaded workshop content for this app.
-        if [ -d "$workshopfolder" ]; then
-            rm -rf "${workshopfolder:?}"/*
-            printf "[ ${green}OK${default} ] Cleared workshop content in ${workshopfolder}\n"
-        fi
-
-        # Remove ONLY the bikeys that were collected from installed mods above.
-        # Official keys (dayz.bikey, dayz_server.bikey, etc.) are left in place.
-        if [ -d "$keys_dir" ] && [ ${#mod_keynames[@]} -gt 0 ]; then
-            local removed_keys=0
-            for keyname in "${mod_keynames[@]}"; do
-                if [ -f "${keys_dir}/${keyname}" ]; then
-                    rm -f "${keys_dir}/${keyname}"
-                    removed_keys=$((removed_keys + 1))
-                fi
-            done
-            printf "[ ${green}OK${default} ] Removed ${removed_keys} mod key(s) from ${keys_dir}\n"
-        fi
-
-        if [ -f "$workshop_cfg" ]; then
-            : > "$workshop_cfg"
-            printf "[ ${green}OK${default} ] Cleared workshop.cfg\n"
-        fi
-
-        if [ -f "$timestamp_file" ]; then
-            echo "{}" > "$timestamp_file"
-        fi
-
-        fn_update_workshop_line
-        printf "[ ${green}DayZ${default} ] All mods removed.\n"
-        return 0
-    fi
-
-    # ----- Single-mod removal -----
-    local mod_id=""
-    local mod_name=""
-
-    if [[ "$target" =~ ^[0-9]+$ ]]; then
-        mod_id="$target"
-        if [ -f "$workshop_cfg" ]; then
-            mod_name=$(grep -E "^[[:space:]]*${mod_id}([[:space:]]|$)" "$workshop_cfg" \
-                | head -n1 \
-                | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' \
-                | cut -d' ' -f2-)
-            [ "$mod_name" = "$mod_id" ] && mod_name=""
-        fi
-    else
-        mod_name="${target#@}"
-        if [ -f "$workshop_cfg" ]; then
-            mod_id=$(grep -E "[[:space:]]${mod_name}[[:space:]]*$" "$workshop_cfg" \
-                | head -n1 \
-                | awk '{print $1}')
-        fi
-    fi
-
-    if [ -z "$mod_id" ] && [ -z "$mod_name" ]; then
-        printf "[ ${red}ERROR${default} ] Mod '${target}' not found in workshop.cfg.\n"
-        exit 1
-    fi
-
-    printf "[ ${magenta}...${default} ] Removing mod: id='${mod_id:-?}' name='${mod_name:-?}'\n"
-
-    # Capture and delete the mod's keys (must happen before we rm the mod folder).
-    if [ -n "$mod_id" ] && [ -d "${workshopfolder}/${mod_id}" ]; then
-        local mod_keys_dir
-        mod_keys_dir=$(find "${workshopfolder}/${mod_id}" -type d \( -iname "keys" -o -iname "key" \) 2>/dev/null | head -n1)
-        if [ -n "$mod_keys_dir" ] && [ -d "$mod_keys_dir" ]; then
-            for keyfile in "$mod_keys_dir"/*.bikey; do
+    # First pass: collect every bikey filename actually shipped by an installed mod,
+    # so we only delete those from serverfiles/keys/ and leave official game keys
+    # (dayz.bikey, dayz_server.bikey, etc.) untouched.
+    local -a mod_keynames=()
+    if [ -d "$workshopfolder" ]; then
+        while IFS= read -r -d '' kdir; do
+            for keyfile in "$kdir"/*.bikey; do
                 [ -f "$keyfile" ] || continue
-                local keyname
-                keyname=$(basename "$keyfile")
-                if [ -f "${keys_dir}/${keyname}" ]; then
-                    rm -f "${keys_dir}/${keyname}"
-                    printf "[ ${green}OK${default} ] Removed key: ${keyname}\n"
-                fi
+                mod_keynames+=("$(basename "$keyfile")")
             done
-        fi
-
-        rm -rf "${workshopfolder}/${mod_id}"
-        printf "[ ${green}OK${default} ] Removed mod folder: ${workshopfolder}/${mod_id}\n"
+        done < <(find "$workshopfolder" -type d \( -iname "keys" -o -iname "key" \) -print0 2>/dev/null)
     fi
 
-    if [ -n "$mod_name" ]; then
-        local link="${HOME}/serverfiles/@${mod_name}"
-        if [ -L "$link" ] || [ -e "$link" ]; then
+    # Remove every @symlink under serverfiles. We intentionally do not touch
+    # serverprofile/ because mods are free to pick any folder name there.
+    if [ -d "${HOME}/serverfiles" ]; then
+        for link in "${HOME}/serverfiles"/@*; do
+            [ -e "$link" ] || [ -L "$link" ] || continue
             rm -rf "$link"
             printf "[ ${green}OK${default} ] Removed: ${link}\n"
-        fi
-
-        if [ -d "${profiles_dir}/@${mod_name}" ]; then
-            rm -rf "${profiles_dir}/@${mod_name}"
-            printf "[ ${green}OK${default} ] Removed profile config: ${profiles_dir}/@${mod_name}\n"
-        fi
-        if [ -d "${profiles_dir}/${mod_name}" ]; then
-            rm -rf "${profiles_dir}/${mod_name}"
-            printf "[ ${green}OK${default} ] Removed profile config: ${profiles_dir}/${mod_name}\n"
-        fi
+        done
     fi
 
-    if [ -n "$mod_id" ] && [ -f "$timestamp_file" ]; then
-        jq --arg mod "$mod_id" 'del(.[$mod])' "$timestamp_file" > "${timestamp_file}.tmp" \
-            && mv "${timestamp_file}.tmp" "$timestamp_file"
+    # Wipe downloaded workshop content for this app.
+    if [ -d "$workshopfolder" ]; then
+        rm -rf "${workshopfolder:?}"/*
+        printf "[ ${green}OK${default} ] Cleared workshop content in ${workshopfolder}\n"
     fi
 
-    if [ -n "$mod_id" ] && [ -f "$workshop_cfg" ]; then
-        sed -i.bak -E "/^[[:space:]]*${mod_id}([[:space:]]|$)/d" "$workshop_cfg"
-        rm -f "${workshop_cfg}.bak"
-        printf "[ ${green}OK${default} ] Removed ${mod_id} from workshop.cfg\n"
+    # Remove ONLY the bikeys that were collected from installed mods above.
+    # Official keys (dayz.bikey, dayz_server.bikey, etc.) are left in place.
+    if [ -d "$keys_dir" ] && [ ${#mod_keynames[@]} -gt 0 ]; then
+        local removed_keys=0
+        for keyname in "${mod_keynames[@]}"; do
+            if [ -f "${keys_dir}/${keyname}" ]; then
+                rm -f "${keys_dir}/${keyname}"
+                removed_keys=$((removed_keys + 1))
+            fi
+        done
+        printf "[ ${green}OK${default} ] Removed ${removed_keys} mod key(s) from ${keys_dir}\n"
+    fi
+
+    if [ -f "$workshop_cfg" ]; then
+        : > "$workshop_cfg"
+        printf "[ ${green}OK${default} ] Cleared workshop.cfg\n"
+    fi
+
+    if [ -f "$timestamp_file" ]; then
+        echo "{}" > "$timestamp_file"
     fi
 
     fn_update_workshop_line
-    printf "[ ${green}DayZ${default} ] Mod removal complete.\n"
+    printf "[ ${green}DayZ${default} ] All mods removed.\n"
+
+    # Drop SteamCMD/workshop caches so the next `ws` starts from a clean manifest.
+    fn_clean_dayz
+
+    # Wipe player + Central Economy state. fn_wipe_dayz reads dayzstatus to decide
+    # whether to stop/restart the server around the wipe, so refresh it first.
+    fn_status_dayz
+    fn_wipe_dayz
 }
 
 
@@ -815,7 +729,7 @@ cmd_workshop=( "ws;workshop" "fn_workshop_mods" "Download Mods from Steam Worksh
 cmd_backup=( "b;backup" "fn_backup_dayz" "Create backup archives of the server (mpmission)." )
 cmd_wipe=( "wi;wipe" "fn_wipe_dayz" "Wipe your server data (Player and Storage)." )
 cmd_clean=( "cl;clean" "fn_clean_dayz" "Clear SteamCMD / workshop caches." )
-cmd_clearmods=( "cm;clearmods" "fn_clear_mods" "Remove all mods, or a specific one: cm [mod_id|@name]." )
+cmd_clearmods=( "cm;clearmods" "fn_clear_mods" "DESTRUCTIVE: remove ALL mods and wipe player/storage data. Setup-only, NOT for production." )
 
 ### Set specific opt here ###
 currentopt=( "${cmd_start[@]}" "${cmd_stop[@]}" "${cmd_restart[@]}" "${cmd_monitor[@]}" "${cmd_console[@]}" "${cmd_install[@]}" "${cmd_update[@]}" "${cmd_validate[@]}" "${cmd_workshop[@]}" "${cmd_backup[@]}" "${cmd_wipe[@]}" "${cmd_clean[@]}" "${cmd_clearmods[@]}" )
@@ -878,8 +792,8 @@ for i in "${optcommands[@]}"; do
 			currcmdamount="$(echo "${currentopt[index]}" | awk -F ';' '{ print NF }')"
 			for ((currcmdindex=1; currcmdindex <= ${currcmdamount}; currcmdindex++)); do
 				if [ "$(echo "${currentopt[index]}" | awk -F ';' -v x=${currcmdindex} '{ print $x }')" == "${getopt}" ]; then
-					# Run command (forward $2 so commands like `cm <mod>` receive their target)
-					"${currentopt[index+1]}" "${2:-}"
+					# Run command
+					eval "${currentopt[index+1]}"
                                         exit 1
 					break
 				fi
