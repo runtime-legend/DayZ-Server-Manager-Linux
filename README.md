@@ -22,8 +22,8 @@ If you prefer to handle scheduled restarts and updates directly through Cron ins
 ```
 @reboot /home/dayz/dayzserver.sh start > /dev/null 2>&1
 */1 * * * * /home/dayz/dayzserver.sh monitor > /dev/null 2>&1
+0 */2 * * * /home/dayz/dayzserver.sh checkmods > /dev/null 2>&1
 0 */3 * * * /home/dayz/dayzserver.sh restart > /dev/null 2>&1
-0 4 * * * /home/dayz/dayzserver.sh u > /dev/null 2>&1
 # */30 * * * * /home/dayz/dayzserver.sh backup > /dev/null 2>&1
 ```
 
@@ -31,8 +31,10 @@ Explanation:
 
 * @reboot – Automatically starts the DayZ server when the system boots.
 * monitor – Runs every minute and restarts the server if it crashes or is shut down through supported restart methods.
-* restart – Performs a scheduled server restart every 3 hours.
-* u – Checks for and installs DayZ server and Workshop mod updates daily at 04:00.
+* checkmods – Runs every 2 hours and checks for available DayZ server or Workshop mod updates. If updates are detected, an update flag is created and the updates will be installed automatically during the next server restart.
+* restart – Performs a scheduled server restart every 3 hours. If a pending update flag exists, updates are installed before the server is started again.
 * backup – Optional periodic backup task (disabled by default).
 
 Replace /home/dayz/ with the actual home directory of the Linux user running the server.
+
+This configuration keeps crash recovery completely independent from Steam update checks while still allowing updates to be installed automatically during the next scheduled restart.
