@@ -156,9 +156,16 @@ fn_start_dayz(){
 		exit 1
 	else
                 fn_backup_dayz
-                # fn_update_dayz and fn_workshop_mods moved to the dedicated `u` / `ws`
-                # commands so start/restart paths stay fast and have no Steam dependency.
-                # Run `./dayzserver.sh u` manually or via a daily cron to apply updates.
+                # If a previous `chm` run found mod updates on the workshop, apply
+                # them now before starting so clients don't get version-mismatched.
+                if [ -f "${HOME}/update_pending" ]; then
+                    printf "[ ${yellow}DayZ${default} ] Pending mod updates detected; applying before start...\n"
+                    fn_workshop_mods
+                    rm -f "${HOME}/update_pending"
+                    printf "[ ${green}DayZ${default} ] Mod updates applied; flag cleared.\n"
+                fi
+                # `u` (server update) is still a dedicated command — run it manually
+                # or via cron to pick up DayZServer binary updates.
                 fn_clear_logs
 		printf "[ ${green}DayZ${default} ] Starting server...\n"
 		sleep 0.5
@@ -355,6 +362,7 @@ fn_workshop_mods(){
     echo "[ DayZ ] Downloading workshop mods..."
 
     local updated_workshop_cfg=""
+    local -a successful_mods=()
 
     for i in "${workshopID[@]}"; do
         # Strip surrounding whitespace; skip empty lines.
@@ -424,6 +432,10 @@ fn_workshop_mods(){
             updated_workshop_cfg+="${mod_id}${mod_name_from_cfg:+ }${mod_name_from_cfg}"$'\n'
             continue
         fi
+
+        # Track mods that fully downloaded so fn_refresh_remote_timestamps below
+        # only updates the baseline for what actually landed on disk.
+        successful_mods+=("$mod_id")
 
         # Resolve the mod's display name. Priority: meta.cpp > workshop.cfg > bare mod_id.
         local mod_meta_file="${workshopfolder}/$mod_id/meta.cpp"
@@ -512,7 +524,133 @@ fn_workshop_mods(){
 
     fn_update_workshop_line
 
+    # Refresh the remote-timestamp baseline for everything that actually downloaded.
+    # fn_check_mods compares against this file to decide if a future workshop
+    # version is newer than what we currently have on disk.
+    if [ ${#successful_mods[@]} -gt 0 ]; then
+        fn_refresh_remote_timestamps "${successful_mods[@]}"
+    fi
+
+    # We just applied whatever was pending; clear the flag the checkmods cron sets.
+    rm -f "${HOME}/update_pending"
+
     echo "[ OK ] Workshop mods done"
+}
+
+# Refresh ~/mod_remote_timestamps.json with the workshop time_updated for each
+# given mod ID. Establishes the baseline that fn_check_mods compares against.
+fn_refresh_remote_timestamps(){
+    local remote_ts="${HOME}/mod_remote_timestamps.json"
+    [ -f "$remote_ts" ] || echo "{}" > "$remote_ts"
+
+    [ "$#" -gt 0 ] || return 0
+
+    local -a curl_args=(-s --max-time 15 -X POST
+        "https://api.steampowered.com/ISteamRemoteStorage/GetPublishedFileDetails/v1/")
+    curl_args+=(-d "itemcount=$#")
+    local i=0
+    for id in "$@"; do
+        curl_args+=(-d "publishedfileids[$i]=$id")
+        i=$((i + 1))
+    done
+
+    local response
+    response=$(curl "${curl_args[@]}" 2>/dev/null)
+    if [ -z "$response" ]; then
+        printf "[ ${yellow}WARN${default} ] Steam API unreachable; baseline not refreshed.\n"
+        return 1
+    fi
+
+    local updates
+    updates=$(echo "$response" | jq -c '
+        [.response.publishedfiledetails[]?
+         | select(.result == 1)
+         | {key: (.publishedfileid|tostring), value: (.time_updated // 0)}]
+        | from_entries // {}')
+    if [ -z "$updates" ] || [ "$updates" = "null" ]; then
+        return 1
+    fi
+
+    jq --argjson updates "$updates" '. * $updates' "$remote_ts" > "${remote_ts}.tmp" \
+        && mv "${remote_ts}.tmp" "$remote_ts"
+}
+
+# Lightweight check: queries Steam Workshop for each mod's current time_updated
+# and compares it to the baseline in ~/mod_remote_timestamps.json. If any are
+# newer, touches ~/update_pending so the next start applies the updates.
+# Designed to run on a frequent cron (e.g. every 2h) so update detection is
+# cheap and doesn't tie up the server with downloads.
+fn_check_mods(){
+    local workshop_cfg="${HOME}/workshop.cfg"
+    local remote_ts="${HOME}/mod_remote_timestamps.json"
+    local flag_file="${HOME}/update_pending"
+
+    if [ ! -f "$workshop_cfg" ] || [ ! -s "$workshop_cfg" ]; then
+        printf "[ ${lightblue}INFO${default} ] No mods configured; nothing to check.\n"
+        return 0
+    fi
+
+    local -a mod_ids=()
+    while read -r line; do
+        line=$(echo "$line" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+        [ -z "$line" ] && continue
+        local id
+        id=$(echo "$line" | awk '{print $1}')
+        [[ "$id" =~ ^[0-9]+$ ]] && mod_ids+=("$id")
+    done < "$workshop_cfg"
+
+    if [ ${#mod_ids[@]} -eq 0 ]; then
+        printf "[ ${lightblue}INFO${default} ] No valid mod IDs in workshop.cfg.\n"
+        return 0
+    fi
+
+    [ -f "$remote_ts" ] || echo "{}" > "$remote_ts"
+
+    local -a curl_args=(-s --max-time 15 -X POST
+        "https://api.steampowered.com/ISteamRemoteStorage/GetPublishedFileDetails/v1/")
+    curl_args+=(-d "itemcount=${#mod_ids[@]}")
+    local i=0
+    for id in "${mod_ids[@]}"; do
+        curl_args+=(-d "publishedfileids[$i]=$id")
+        i=$((i + 1))
+    done
+
+    local response
+    response=$(curl "${curl_args[@]}" 2>/dev/null)
+    if [ -z "$response" ]; then
+        printf "[ ${yellow}WARN${default} ] Steam API unreachable; skipping check.\n"
+        return 1
+    fi
+
+    local -a updated_mods=()
+    while IFS=$'\t' read -r pid tupdated; do
+        [ -z "$pid" ] && continue
+        local stored
+        stored=$(jq -r --arg p "$pid" '.[$p] // 0' "$remote_ts")
+        if [ "$tupdated" -gt "$stored" ]; then
+            updated_mods+=("$pid")
+        fi
+    done < <(echo "$response" | jq -r '
+        .response.publishedfiledetails[]?
+        | select(.result == 1)
+        | "\(.publishedfileid)\t\(.time_updated // 0)"')
+
+    if [ ${#updated_mods[@]} -gt 0 ]; then
+        date > "$flag_file"
+        printf "[ ${yellow}DayZ${default} ] %d mod update(s) available. Flagged for next start.\n" "${#updated_mods[@]}"
+        for m in "${updated_mods[@]}"; do
+            printf "  - %s\n" "$m"
+        done
+        if [ -n "$discord_webhook_url" ]; then
+            local mod_list
+            mod_list=$(printf "%s, " "${updated_mods[@]}" | sed 's/, $//')
+            curl -sS -H "Content-Type: application/json" -X POST \
+                -d "{\"content\": \"Mod updates available: ${mod_list}. Will apply on next restart.\"}" \
+                "$discord_webhook_url" >/dev/null || true
+        fi
+    else
+        printf "[ ${green}OK${default} ] No mod updates available.\n"
+    fi
 }
 
 # Build the workshop="@..." line from workshop.cfg and write it into config.ini,
@@ -726,13 +864,14 @@ cmd_install=( "i;install" "fn_install_dayz" "Install steamcmd and DayZ Server-Fi
 cmd_update=( "u;update" "fn_update_dayz" "Check and apply any server updates." )
 cmd_validate=( "v;validate" "fn_validate_dayz" "Validate server files with SteamCMD." )
 cmd_workshop=( "ws;workshop" "fn_workshop_mods" "Download Mods from Steam Workshop." )
+cmd_checkmods=( "chm;checkmods" "fn_check_mods" "Check Steam Workshop for mod updates; flags pending updates for the next start." )
 cmd_backup=( "b;backup" "fn_backup_dayz" "Create backup archives of the server (mpmission)." )
 cmd_wipe=( "wi;wipe" "fn_wipe_dayz" "Wipe your server data (Player and Storage)." )
 cmd_cleancache=( "cc;cleancache" "fn_clean_dayz" "Clear SteamCMD / workshop caches." )
 cmd_cleanmods=( "cm;cleanmods" "fn_clean_mods" "DESTRUCTIVE: Remove ALL mods and wipe player/storage data. Setup-only; NOT for production." )
 
 ### Set specific opt here ###
-currentopt=( "${cmd_start[@]}" "${cmd_stop[@]}" "${cmd_restart[@]}" "${cmd_monitor[@]}" "${cmd_console[@]}" "${cmd_install[@]}" "${cmd_update[@]}" "${cmd_validate[@]}" "${cmd_workshop[@]}" "${cmd_backup[@]}" "${cmd_wipe[@]}" "${cmd_cleancache[@]}" "${cmd_cleanmods[@]}" )
+currentopt=( "${cmd_start[@]}" "${cmd_stop[@]}" "${cmd_restart[@]}" "${cmd_monitor[@]}" "${cmd_console[@]}" "${cmd_install[@]}" "${cmd_update[@]}" "${cmd_validate[@]}" "${cmd_workshop[@]}" "${cmd_checkmods[@]}" "${cmd_backup[@]}" "${cmd_wipe[@]}" "${cmd_cleancache[@]}" "${cmd_cleanmods[@]}" )
 
 ### Build list of available commands
 optcommands=()
