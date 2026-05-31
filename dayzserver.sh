@@ -568,7 +568,7 @@ fn_update_workshop_line(){
 # runs the player/CE wipe. serverprofile is intentionally left alone — there is no
 # reliable way to map a mod to the folder name it picks under serverprofile/.
 # DESTRUCTIVE — intended for fresh setup, not running production servers.
-fn_clear_mods(){
+fn_clean_mods(){
     local workshopfolder="${HOME}/serverfiles/steamapps/workshop/content/${dayz_id}"
     local workshop_cfg="${HOME}/workshop.cfg"
     local keys_dir="${HOME}/serverfiles/keys"
@@ -728,11 +728,11 @@ cmd_validate=( "v;validate" "fn_validate_dayz" "Validate server files with Steam
 cmd_workshop=( "ws;workshop" "fn_workshop_mods" "Download Mods from Steam Workshop." )
 cmd_backup=( "b;backup" "fn_backup_dayz" "Create backup archives of the server (mpmission)." )
 cmd_wipe=( "wi;wipe" "fn_wipe_dayz" "Wipe your server data (Player and Storage)." )
-cmd_clean=( "cl;clean" "fn_clean_dayz" "Clear SteamCMD / workshop caches." )
-cmd_clearmods=( "cm;clearmods" "fn_clear_mods" "DESTRUCTIVE: remove ALL mods and wipe player/storage data. Setup-only, NOT for production." )
+cmd_cleancache=( "cc;cleancache" "fn_clean_dayz" "Clear SteamCMD / workshop caches." )
+cmd_cleanmods=( "cm;cleanmods" "fn_clean_mods" "DESTRUCTIVE: Remove ALL mods and wipe player/storage data. Setup-only; NOT for production." )
 
 ### Set specific opt here ###
-currentopt=( "${cmd_start[@]}" "${cmd_stop[@]}" "${cmd_restart[@]}" "${cmd_monitor[@]}" "${cmd_console[@]}" "${cmd_install[@]}" "${cmd_update[@]}" "${cmd_validate[@]}" "${cmd_workshop[@]}" "${cmd_backup[@]}" "${cmd_wipe[@]}" "${cmd_clean[@]}" "${cmd_clearmods[@]}" )
+currentopt=( "${cmd_start[@]}" "${cmd_stop[@]}" "${cmd_restart[@]}" "${cmd_monitor[@]}" "${cmd_console[@]}" "${cmd_install[@]}" "${cmd_update[@]}" "${cmd_validate[@]}" "${cmd_workshop[@]}" "${cmd_backup[@]}" "${cmd_wipe[@]}" "${cmd_cleancache[@]}" "${cmd_cleanmods[@]}" )
 
 ### Build list of available commands
 optcommands=()
