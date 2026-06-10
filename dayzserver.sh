@@ -74,7 +74,6 @@ else
     # Source the config file to load its variables
     source "$CONFIG_FILE"
     printf "[ ${green}Finished${default} ] Configuration file loaded.\n"
-    chmod 600 "$CONFIG_FILE"
 fi
 
 # Check if steamlogin is set to CHANGEME
