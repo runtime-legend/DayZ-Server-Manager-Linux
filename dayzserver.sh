@@ -64,10 +64,10 @@ discord_webhook_url=\"\"
 # modify carefully! server won't start if syntax is corrupt!
 dayzparameter=\" -config=\${config} -port=\${port} -limitFPS=\${limitFPS} -freezecheck \${BEpath} \${profiles} \${logs}\""
 
-# Identify the command early. cleanserver deletes the installed server files, so
-# it must skip the auto-install gate further down (otherwise a second run would
-# redownload the server). config.ini and the Steam login are preserved by the
-# cleanup, so the config/steamlogin checks below keep working normally.
+# Identify the command early. cleanserver only deletes files - it needs no
+# config.ini, no Steam login and no installed server files - so it must run in
+# any state. It therefore skips the setup gates below (config regeneration,
+# steamlogin check and the auto-install gate further down).
 getopt="$1"
 case "$getopt" in
     cs|cleanserver) maintenance_mode=1 ;;
@@ -76,12 +76,16 @@ esac
 
 # Check if the config.ini file exists
 if [ ! -f "$CONFIG_FILE" ]; then
-    printf "[ ${yellow}Warning${default} ] ${CONFIG_FILE} file not found.\n"
-    echo -e "$DEFAULT_CONFIG" > "$CONFIG_FILE"
-    printf "[ ${green}Fixed${default} ] Default ${lightyellow}${CONFIG_FILE}${default} created.\n"
-    printf "[ ${red}Important${default} ] Please edit the ${CONFIG_FILE} file before running this script again.\n"
-    chmod 600 "$CONFIG_FILE"
-    exit 1
+    if [ "$maintenance_mode" = "1" ]; then
+        printf "[ ${lightblue}INFO${default} ] ${CONFIG_FILE} not found - continuing anyway (${getopt}).\n"
+    else
+        printf "[ ${yellow}Warning${default} ] ${CONFIG_FILE} file not found.\n"
+        echo -e "$DEFAULT_CONFIG" > "$CONFIG_FILE"
+        printf "[ ${green}Fixed${default} ] Default ${lightyellow}${CONFIG_FILE}${default} created.\n"
+        printf "[ ${red}Important${default} ] Please edit the ${CONFIG_FILE} file before running this script again.\n"
+        chmod 600 "$CONFIG_FILE"
+        exit 1
+    fi
 else
     printf "[ ${green}Success${default} ] Config file found. Reading values...\n"
     # Source the config file to load its variables
@@ -91,7 +95,7 @@ else
 fi
 
 # Check if steamlogin is set to CHANGEME
-if [ "$steamlogin" = "CHANGEME" ]; then
+if [ "$maintenance_mode" != "1" ] && [ "$steamlogin" = "CHANGEME" ]; then
 	printf "[ ${red}Error${default} ] Please update ${CONFIG_FILE} before running this script again.\n"
 	exit 1
 fi
