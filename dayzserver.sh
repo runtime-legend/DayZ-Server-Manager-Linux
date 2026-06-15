@@ -40,6 +40,9 @@ dayz_id=221100
 # Game Port (Not Steam QueryPort. Add/Change that in your serverDZ.cfg file)
 port=2301
 
+# Limit the server frame rate (FPS).
+limitFPS=60
+
 # IMPORTANT PARAMETERS
 steamlogin=CHANGEME
 config=serverDZ.cfg
@@ -59,7 +62,7 @@ discord_webhook_url=\"\"
 #servermods=\"\"
 
 # modify carefully! server won't start if syntax is corrupt!
-dayzparameter=\" -config=\${config} -port=\${port} -freezecheck \${BEpath} \${profiles} \${logs}\""
+dayzparameter=\" -config=\${config} -port=\${port} -limitFPS=\${limitFPS} -freezecheck \${BEpath} \${profiles} \${logs}\""
 
 # Check if the config.ini file exists
 if [ ! -f "$CONFIG_FILE" ]; then
@@ -74,6 +77,7 @@ else
     # Source the config file to load its variables
     source "$CONFIG_FILE"
     printf "[ ${green}Finished${default} ] Configuration file loaded.\n"
+    chmod 600 "$CONFIG_FILE"
 fi
 
 # Check if steamlogin is set to CHANGEME
@@ -521,7 +525,9 @@ fn_workshop_mods(){
     done | sort
     echo "----------------------------------------"
 
-    fn_update_workshop_line
+    # The workshop= line in config.ini is no longer touched automatically here.
+    # Run "$0 updateconfig" (uc) manually to regenerate it from workshop.cfg.
+    printf "[ ${cyan}INFO${default} ] Run '${lightblue}$0 updateconfig${default}' to update the workshop= line in ${CONFIG_FILE}.\n"
 
     # Refresh the remote-timestamp baseline for everything that actually downloaded.
     # fn_check_mods compares against this file to decide if a future workshop
@@ -664,6 +670,7 @@ fn_update_workshop_line(){
     fi
 
     local mod_line=""
+    local -a skipped=()
     if [ -f "$workshop_cfg" ]; then
         while read -r line; do
             line=$(echo "$line" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
@@ -676,6 +683,27 @@ fn_update_workshop_line(){
             # Skip lines without a resolved mod name.
             [ -z "$name_part" ] && continue
             [ "$name_part" = "$mod_id_part" ] && continue
+
+            # Only include mods that are actually installed and loadable. The
+            # @<name> symlink in serverfiles must resolve to a folder that holds
+            # at least one addons/*.pbo - that's what the engine loads. If the
+            # download failed or is incomplete the symlink is missing or empty,
+            # and listing it would crash the server on start, so we skip it.
+            local mod_link="${HOME}/serverfiles/@${name_part}"
+            if [ ! -e "$mod_link" ]; then
+                printf "[ ${yellow}WARN${default} ] Skipping @%s (id %s): not installed.\n" "$name_part" "$mod_id_part"
+                skipped+=("@${name_part}")
+                continue
+            fi
+            local pbo has_pbo=0
+            for pbo in "${mod_link}/addons/"*.pbo; do
+                [ -e "$pbo" ] && { has_pbo=1; break; }
+            done
+            if [ "$has_pbo" -ne 1 ]; then
+                printf "[ ${yellow}WARN${default} ] Skipping @%s (id %s): no addons/*.pbo (incomplete download).\n" "$name_part" "$mod_id_part"
+                skipped+=("@${name_part}")
+                continue
+            fi
 
             if [ -z "$mod_line" ]; then
                 mod_line="@${name_part}"
@@ -697,89 +725,82 @@ fn_update_workshop_line(){
     fi
 
     printf "[ ${cyan}INFO${default} ] workshop=\"${green}${mod_line}${default}\"\n"
+
+    # Loudly report anything that was left out so a missing mod isn't silently
+    # dropped from the server. Notify Discord too, if configured.
+    if [ ${#skipped[@]} -gt 0 ]; then
+        local skipped_list
+        skipped_list=$(printf "%s, " "${skipped[@]}" | sed 's/, $//')
+        printf "[ ${yellow}WARN${default} ] %d mod(s) excluded (not installed/incomplete): ${yellow}%s${default}\n" "${#skipped[@]}" "$skipped_list"
+        if [ -n "$discord_webhook_url" ]; then
+            curl -sS -H "Content-Type: application/json" -X POST \
+                -d "{\"content\": \"Excluded from config.ini (not installed/incomplete): ${skipped_list}. Re-run mod download.\"}" \
+                "$discord_webhook_url" >/dev/null || true
+        fi
+    fi
 }
 
-# Remove ALL installed mods and wipe player/storage data.
-# Cleans: workshop content folder, @symlinks in serverfiles, mod-shipped bikeys,
-# workshop.cfg, mod_timestamps.json, the workshop= line in config.ini, and finally
-# runs the player/CE wipe. serverprofile is intentionally left alone — there is no
-# reliable way to map a mod to the folder name it picks under serverprofile/.
-# DESTRUCTIVE — intended for fresh setup, not running production servers.
-fn_clean_mods(){
-    local workshopfolder="${HOME}/serverfiles/steamapps/workshop/content/${dayz_id}"
-    local workshop_cfg="${HOME}/workshop.cfg"
-    local keys_dir="${HOME}/serverfiles/keys"
-    local timestamp_file="${HOME}/mod_timestamps.json"
-
-    printf "[ ${red}WARNING${default} ] This will remove ALL installed mods AND wipe player/storage data.\n"
-    printf "[ ${red}WARNING${default} ] Intended for initial setup only. Do NOT run on a live/production server.\n"
-    for seconds in {5..1}; do
+# Completely remove the DayZ server installation, returning the account to a
+# clean slate. After this runs, only dayzserver.sh (plus the user's own dotfiles)
+# remains: every server file, mod, profile, backup, lock/state file, config.ini
+# and the Steam cache is deleted. The next run reinstalls from scratch and
+# regenerates a default config.ini.
+# DESTRUCTIVE — intended for a full reset, NEVER on a live/production server.
+fn_clean_server(){
+    printf "[ ${red}WARNING${default} ] This will DELETE the ENTIRE DayZ server installation.\n"
+    printf "[ ${red}WARNING${default} ] Server files, mods, profiles, backups, ${CONFIG_FILE} and the Steam cache will be removed.\n"
+    printf "[ ${red}WARNING${default} ] Only dayzserver.sh will remain. This CANNOT be undone.\n"
+    for seconds in {10..1}; do
         printf "\r\tProceeding in ${red}${seconds}${default} seconds... (Ctrl+C to cancel)"
         sleep 1
     done
     printf "\n"
 
-    # First pass: collect every bikey filename actually shipped by an installed mod,
-    # so we only delete those from serverfiles/keys/ and leave official game keys
-    # (dayz.bikey, dayz_server.bikey, etc.) untouched.
-    local -a mod_keynames=()
-    if [ -d "$workshopfolder" ]; then
-        while IFS= read -r -d '' kdir; do
-            for keyfile in "$kdir"/*.bikey; do
-                [ -f "$keyfile" ] || continue
-                mod_keynames+=("$(basename "$keyfile")")
-            done
-        done < <(find "$workshopfolder" -type d \( -iname "keys" -o -iname "key" \) -print0 2>/dev/null)
-    fi
-
-    # Remove every @symlink under serverfiles. We intentionally do not touch
-    # serverprofile/ because mods are free to pick any folder name there.
-    if [ -d "${HOME}/serverfiles" ]; then
-        for link in "${HOME}/serverfiles"/@*; do
-            [ -e "$link" ] || [ -L "$link" ] || continue
-            rm -rf "$link"
-            printf "[ ${green}OK${default} ] Removed: ${link}\n"
-        done
-    fi
-
-    # Wipe downloaded workshop content for this app.
-    if [ -d "$workshopfolder" ]; then
-        rm -rf "${workshopfolder:?}"/*
-        printf "[ ${green}OK${default} ] Cleared workshop content in ${workshopfolder}\n"
-    fi
-
-    # Remove ONLY the bikeys that were collected from installed mods above.
-    # Official keys (dayz.bikey, dayz_server.bikey, etc.) are left in place.
-    if [ -d "$keys_dir" ] && [ ${#mod_keynames[@]} -gt 0 ]; then
-        local removed_keys=0
-        for keyname in "${mod_keynames[@]}"; do
-            if [ -f "${keys_dir}/${keyname}" ]; then
-                rm -f "${keys_dir}/${keyname}"
-                removed_keys=$((removed_keys + 1))
-            fi
-        done
-        printf "[ ${green}OK${default} ] Removed ${removed_keys} mod key(s) from ${keys_dir}\n"
-    fi
-
-    if [ -f "$workshop_cfg" ]; then
-        : > "$workshop_cfg"
-        printf "[ ${green}OK${default} ] Cleared workshop.cfg\n"
-    fi
-
-    if [ -f "$timestamp_file" ]; then
-        echo "{}" > "$timestamp_file"
-    fi
-
-    fn_update_workshop_line
-    printf "[ ${green}DayZ${default} ] All mods removed.\n"
-
-    # Drop SteamCMD/workshop caches so the next `ws` starts from a clean manifest.
-    fn_clean_dayz
-
-    # Wipe player + Central Economy state. fn_wipe_dayz reads dayzstatus to decide
-    # whether to stop/restart the server around the wipe, so refresh it first.
+    # Make sure the server isn't running while we delete its files.
     fn_status_dayz
-    fn_wipe_dayz
+    if [ "${dayzstatus}" == "1" ]; then
+        printf "[ ${yellow}DayZ${default} ] Server is running; stopping it first...\n"
+        fn_stop_dayz
+    fi
+
+    # Directories and files created by the script or SteamCMD. Anything not listed
+    # here (e.g. the user's own dotfiles) is left untouched.
+    local -a dayz_dirs=(
+        "${HOME}/serverfiles"
+        "${HOME}/serverprofile"
+        "${HOME}/steamcmd"
+        "${HOME}/Steam"
+        "${HOME}/.steam"
+        "${HOME}/backup"
+    )
+    local -a dayz_files=(
+        "${HOME}/${CONFIG_FILE}"
+        "${HOME}/workshop.cfg"
+        "${HOME}/mod_timestamps.json"
+        "${HOME}/mod_remote_timestamps.json"
+        "${HOME}/update_pending"
+        "${HOME}/.dayzlockfile"
+        "${HOME}/.dayzlockupdate"
+        "${HOME}/.steamcmd_last.log"
+    )
+
+    local d f
+    for d in "${dayz_dirs[@]}"; do
+        if [ -d "$d" ] || [ -L "$d" ]; then
+            rm -rf "$d"
+            printf "[ ${green}OK${default} ] Removed ${d}\n"
+        fi
+    done
+
+    for f in "${dayz_files[@]}"; do
+        if [ -e "$f" ] || [ -L "$f" ]; then
+            rm -f "$f"
+            printf "[ ${green}OK${default} ] Removed ${f}\n"
+        fi
+    done
+
+    printf "[ ${green}DayZ${default} ] Full cleanup complete. Only dayzserver.sh remains.\n"
+    printf "[ ${cyan}INFO${default} ] Run '${lightblue}$0 install${default}' to set up a fresh server.\n"
 }
 
 
@@ -863,14 +884,15 @@ cmd_install=( "i;install" "fn_install_dayz" "Install steamcmd and DayZ Server-Fi
 cmd_update=( "u;update" "fn_update_dayz" "Check and apply any server updates." )
 cmd_validate=( "v;validate" "fn_validate_dayz" "Validate server files with SteamCMD." )
 cmd_workshop=( "ws;workshop" "fn_workshop_mods" "Download Mods from Steam Workshop." )
+cmd_updateconfig=( "uc;updateconfig" "fn_update_workshop_line" "Rebuild the workshop= line in config.ini from workshop.cfg." )
 cmd_checkmods=( "chm;checkmods" "fn_check_mods" "Check Steam Workshop for mod updates; flags pending updates for the next start." )
 cmd_backup=( "b;backup" "fn_backup_dayz" "Create backup archives of the server (mpmission)." )
 cmd_wipe=( "wi;wipe" "fn_wipe_dayz" "Wipe your server data (Player and Storage)." )
 cmd_cleancache=( "cc;cleancache" "fn_clean_dayz" "Clear SteamCMD / workshop caches." )
-cmd_cleanmods=( "cm;cleanmods" "fn_clean_mods" "DESTRUCTIVE: Remove ALL mods and wipe player/storage data. Setup-only; NOT for production." )
+cmd_cleanserver=( "cs;cleanserver" "fn_clean_server" "DESTRUCTIVE: Delete the ENTIRE install (files, mods, profiles, backups, config, Steam cache); leaves only dayzserver.sh." )
 
 ### Set specific opt here ###
-currentopt=( "${cmd_start[@]}" "${cmd_stop[@]}" "${cmd_restart[@]}" "${cmd_monitor[@]}" "${cmd_console[@]}" "${cmd_install[@]}" "${cmd_update[@]}" "${cmd_validate[@]}" "${cmd_workshop[@]}" "${cmd_checkmods[@]}" "${cmd_backup[@]}" "${cmd_wipe[@]}" "${cmd_cleancache[@]}" "${cmd_cleanmods[@]}" )
+currentopt=( "${cmd_start[@]}" "${cmd_stop[@]}" "${cmd_restart[@]}" "${cmd_monitor[@]}" "${cmd_console[@]}" "${cmd_install[@]}" "${cmd_update[@]}" "${cmd_validate[@]}" "${cmd_workshop[@]}" "${cmd_updateconfig[@]}" "${cmd_checkmods[@]}" "${cmd_backup[@]}" "${cmd_wipe[@]}" "${cmd_cleancache[@]}" "${cmd_cleanserver[@]}" )
 
 ### Build list of available commands
 optcommands=()
