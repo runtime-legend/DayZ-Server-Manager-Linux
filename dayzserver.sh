@@ -74,30 +74,30 @@ case "$getopt" in
     *)              maintenance_mode=0 ;;
 esac
 
-# Check if the config.ini file exists
-if [ ! -f "$CONFIG_FILE" ]; then
-    if [ "$maintenance_mode" = "1" ]; then
-        printf "[ ${lightblue}INFO${default} ] ${CONFIG_FILE} not found - continuing anyway (${getopt}).\n"
-    else
+# Maintenance commands (cleanserver) only delete files - they load nothing and
+# print nothing here. Everything else loads config.ini and validates it.
+if [ "$maintenance_mode" != "1" ]; then
+    # Check if the config.ini file exists
+    if [ ! -f "$CONFIG_FILE" ]; then
         printf "[ ${yellow}Warning${default} ] ${CONFIG_FILE} file not found.\n"
         echo -e "$DEFAULT_CONFIG" > "$CONFIG_FILE"
         printf "[ ${green}Fixed${default} ] Default ${lightyellow}${CONFIG_FILE}${default} created.\n"
         printf "[ ${red}Important${default} ] Please edit the ${CONFIG_FILE} file before running this script again.\n"
         chmod 600 "$CONFIG_FILE"
         exit 1
+    else
+        printf "[ ${green}Success${default} ] Config file found. Reading values...\n"
+        # Source the config file to load its variables
+        source "$CONFIG_FILE"
+        printf "[ ${green}Finished${default} ] Configuration file loaded.\n"
+        chmod 600 "$CONFIG_FILE"
     fi
-else
-    printf "[ ${green}Success${default} ] Config file found. Reading values...\n"
-    # Source the config file to load its variables
-    source "$CONFIG_FILE"
-    printf "[ ${green}Finished${default} ] Configuration file loaded.\n"
-    chmod 600 "$CONFIG_FILE"
-fi
 
-# Check if steamlogin is set to CHANGEME
-if [ "$maintenance_mode" != "1" ] && [ "$steamlogin" = "CHANGEME" ]; then
-	printf "[ ${red}Error${default} ] Please update ${CONFIG_FILE} before running this script again.\n"
-	exit 1
+    # Check if steamlogin is set to CHANGEME
+    if [ "$steamlogin" = "CHANGEME" ]; then
+        printf "[ ${red}Error${default} ] Please update ${CONFIG_FILE} before running this script again.\n"
+        exit 1
+    fi
 fi
 
 fn_checkroot_dayz(){
@@ -765,11 +765,6 @@ fn_update_workshop_line(){
 fn_clean_server(){
     printf "[ ${red}WARNING${default} ] This will DELETE the DayZ server files (install, mods, profiles, backups, ${CONFIG_FILE}).\n"
     printf "[ ${lightblue}INFO${default} ] Steam authorization is preserved.\n"
-    for seconds in {5..1}; do
-        printf "\r\tProceeding in ${red}${seconds}${default} seconds... (Ctrl+C to cancel)"
-        sleep 1
-    done
-    printf "\n"
 
     # Make sure the server isn't running while we delete its files.
     fn_status_dayz
@@ -946,7 +941,8 @@ fn_opt_usage(){
 
 # start functions
 fn_checkroot_dayz
-check_dependencies
+# cleanserver just deletes files; skip the dependency check (and its output).
+[ "$maintenance_mode" = "1" ] || check_dependencies
 fn_checkscreen
 
 getopt=$1
