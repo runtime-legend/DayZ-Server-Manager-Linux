@@ -861,18 +861,27 @@ fn_wipe_dayz(){
 }
 
 fn_clean_dayz(){
-	printf "[ ${magenta}...${default} ] Clearing SteamCMD / workshop caches...\n"
+	printf "[ ${magenta}...${default} ] Clearing SteamCMD / workshop caches (login is preserved)...\n"
 
-	rm -rf "${HOME}/Steam/appcache"
-	printf "[ ${green}OK${default} ] Removed ${HOME}/Steam/appcache\n"
+	# App-info metadata cache. Remove ONLY the metadata vdf files, not the whole
+	# appcache directory - this forces SteamCMD to re-fetch fresh version info
+	# without disturbing the saved login. The authorization/sentry lives in
+	# ${HOME}/Steam/config (config.vdf, loginusers.vdf) and ssfn* files, which we
+	# never touch, so the user stays signed in.
+	rm -f "${HOME}/Steam/appcache/appinfo.vdf" "${HOME}/Steam/appcache/packageinfo.vdf"
+	printf "[ ${green}OK${default} ] Cleared Steam appinfo/packageinfo metadata cache\n"
 
+	# Partial / interrupted downloads (game + workshop).
 	rm -rf "${HOME}/serverfiles/steamapps/downloading"
-	printf "[ ${green}OK${default} ] Removed ${HOME}/serverfiles/steamapps/downloading\n"
+	rm -rf "${HOME}/serverfiles/steamapps/workshop/downloads"
+	rm -rf "${HOME}/serverfiles/steamapps/workshop/temp"
+	printf "[ ${green}OK${default} ] Removed partial download caches\n"
 
+	# Workshop manifest for this app (forces a clean re-check of mod state).
 	rm -f "${HOME}/serverfiles/steamapps/workshop/appworkshop_${dayz_id}.acf"
 	printf "[ ${green}OK${default} ] Removed ${HOME}/serverfiles/steamapps/workshop/appworkshop_${dayz_id}.acf\n"
 
-	printf "[ ${green}DayZ${default} ] Cache cleared.\n"
+	printf "[ ${green}DayZ${default} ] Cache cleared. Steam login preserved.\n"
 }
 
 cmd_start=( "st;start" "fn_start_dayz" "Start the server." )
