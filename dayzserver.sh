@@ -754,18 +754,17 @@ fn_update_workshop_line(){
     fi
 }
 
-# Clean up the DayZ server files: server install, mods, profiles, backups and
-# the script's own state/lock files. This is safe to run any number of times.
+# Clean up the DayZ server files: server install, mods, profiles, backups,
+# config.ini and the script's own state/lock files. This only deletes - it does
+# NOT regenerate config.ini or redownload the server, so it is safe to run any
+# number of times.
 # PRESERVED on purpose:
 #   - dayzserver.sh itself
 #   - the Steam authorization (${HOME}/Steam, ${HOME}/.steam) so you stay logged
 #     in and don't have to re-authenticate after a cleanup
-#   - config.ini (it holds your steamlogin and settings)
-# After this you can just run the script again - it reinstalls the server files
-# without asking you to log in again.
 fn_clean_server(){
-    printf "[ ${red}WARNING${default} ] This will DELETE the DayZ server files (install, mods, profiles, backups).\n"
-    printf "[ ${lightblue}INFO${default} ] Steam authorization and ${CONFIG_FILE} are preserved.\n"
+    printf "[ ${red}WARNING${default} ] This will DELETE the DayZ server files (install, mods, profiles, backups, ${CONFIG_FILE}).\n"
+    printf "[ ${lightblue}INFO${default} ] Steam authorization is preserved.\n"
     for seconds in {5..1}; do
         printf "\r\tProceeding in ${red}${seconds}${default} seconds... (Ctrl+C to cancel)"
         sleep 1
@@ -789,6 +788,7 @@ fn_clean_server(){
         "${HOME}/backup"
     )
     local -a dayz_files=(
+        "${HOME}/${CONFIG_FILE}"
         "${HOME}/workshop.cfg"
         "${HOME}/mod_timestamps.json"
         "${HOME}/mod_remote_timestamps.json"
@@ -813,8 +813,7 @@ fn_clean_server(){
         fi
     done
 
-    printf "[ ${green}DayZ${default} ] Cleanup complete. Steam login and ${CONFIG_FILE} preserved.\n"
-    printf "[ ${cyan}INFO${default} ] Run '${lightblue}$0 install${default}' to reinstall the server files.\n"
+    printf "[ ${green}DayZ${default} ] Cleanup complete. Steam authorization preserved.\n"
 }
 
 
@@ -912,7 +911,7 @@ cmd_checkmods=( "chm;checkmods" "fn_check_mods" "Check Steam Workshop for mod up
 cmd_backup=( "b;backup" "fn_backup_dayz" "Create backup archives of the server (mpmission)." )
 cmd_wipe=( "wi;wipe" "fn_wipe_dayz" "Wipe your server data (Player and Storage)." )
 cmd_cleancache=( "cc;cleancache" "fn_clean_dayz" "Clear SteamCMD / workshop caches." )
-cmd_cleanserver=( "cs;cleanserver" "fn_clean_server" "Clean up server files (install, mods, profiles, backups). Keeps Steam login and config.ini; re-runnable." )
+cmd_cleanserver=( "cs;cleanserver" "fn_clean_server" "Clean up server files (install, mods, profiles, backups, config). Keeps Steam authorization; re-runnable." )
 
 ### Set specific opt here ###
 currentopt=( "${cmd_start[@]}" "${cmd_stop[@]}" "${cmd_restart[@]}" "${cmd_monitor[@]}" "${cmd_console[@]}" "${cmd_install[@]}" "${cmd_update[@]}" "${cmd_validate[@]}" "${cmd_workshop[@]}" "${cmd_updateconfig[@]}" "${cmd_checkmods[@]}" "${cmd_backup[@]}" "${cmd_wipe[@]}" "${cmd_cleancache[@]}" "${cmd_cleanserver[@]}" )
