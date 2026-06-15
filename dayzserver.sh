@@ -64,6 +64,16 @@ discord_webhook_url=\"\"
 # modify carefully! server won't start if syntax is corrupt!
 dayzparameter=\" -config=\${config} -port=\${port} -limitFPS=\${limitFPS} -freezecheck \${BEpath} \${profiles} \${logs}\""
 
+# Identify the command early. cleanserver deletes the installed server files, so
+# it must skip the auto-install gate further down (otherwise a second run would
+# redownload the server). config.ini and the Steam login are preserved by the
+# cleanup, so the config/steamlogin checks below keep working normally.
+getopt="$1"
+case "$getopt" in
+    cs|cleanserver) maintenance_mode=1 ;;
+    *)              maintenance_mode=0 ;;
+esac
+
 # Check if the config.ini file exists
 if [ ! -f "$CONFIG_FILE" ]; then
     printf "[ ${yellow}Warning${default} ] ${CONFIG_FILE} file not found.\n"
@@ -740,17 +750,19 @@ fn_update_workshop_line(){
     fi
 }
 
-# Completely remove the DayZ server installation, returning the account to a
-# clean slate. After this runs, only dayzserver.sh (plus the user's own dotfiles)
-# remains: every server file, mod, profile, backup, lock/state file, config.ini
-# and the Steam cache is deleted. The next run reinstalls from scratch and
-# regenerates a default config.ini.
-# DESTRUCTIVE — intended for a full reset, NEVER on a live/production server.
+# Clean up the DayZ server files: server install, mods, profiles, backups and
+# the script's own state/lock files. This is safe to run any number of times.
+# PRESERVED on purpose:
+#   - dayzserver.sh itself
+#   - the Steam authorization (${HOME}/Steam, ${HOME}/.steam) so you stay logged
+#     in and don't have to re-authenticate after a cleanup
+#   - config.ini (it holds your steamlogin and settings)
+# After this you can just run the script again - it reinstalls the server files
+# without asking you to log in again.
 fn_clean_server(){
-    printf "[ ${red}WARNING${default} ] This will DELETE the ENTIRE DayZ server installation.\n"
-    printf "[ ${red}WARNING${default} ] Server files, mods, profiles, backups, ${CONFIG_FILE} and the Steam cache will be removed.\n"
-    printf "[ ${red}WARNING${default} ] Only dayzserver.sh will remain. This CANNOT be undone.\n"
-    for seconds in {10..1}; do
+    printf "[ ${red}WARNING${default} ] This will DELETE the DayZ server files (install, mods, profiles, backups).\n"
+    printf "[ ${lightblue}INFO${default} ] Steam authorization and ${CONFIG_FILE} are preserved.\n"
+    for seconds in {5..1}; do
         printf "\r\tProceeding in ${red}${seconds}${default} seconds... (Ctrl+C to cancel)"
         sleep 1
     done
@@ -763,18 +775,16 @@ fn_clean_server(){
         fn_stop_dayz
     fi
 
-    # Directories and files created by the script or SteamCMD. Anything not listed
-    # here (e.g. the user's own dotfiles) is left untouched.
+    # Server files created by the script / SteamCMD. The Steam client dirs
+    # (${HOME}/Steam, ${HOME}/.steam) are intentionally NOT listed so the saved
+    # login survives. The user's own dotfiles are likewise untouched.
     local -a dayz_dirs=(
         "${HOME}/serverfiles"
         "${HOME}/serverprofile"
         "${HOME}/steamcmd"
-        "${HOME}/Steam"
-        "${HOME}/.steam"
         "${HOME}/backup"
     )
     local -a dayz_files=(
-        "${HOME}/${CONFIG_FILE}"
         "${HOME}/workshop.cfg"
         "${HOME}/mod_timestamps.json"
         "${HOME}/mod_remote_timestamps.json"
@@ -799,8 +809,8 @@ fn_clean_server(){
         fi
     done
 
-    printf "[ ${green}DayZ${default} ] Full cleanup complete. Only dayzserver.sh remains.\n"
-    printf "[ ${cyan}INFO${default} ] Run '${lightblue}$0 install${default}' to set up a fresh server.\n"
+    printf "[ ${green}DayZ${default} ] Cleanup complete. Steam login and ${CONFIG_FILE} preserved.\n"
+    printf "[ ${cyan}INFO${default} ] Run '${lightblue}$0 install${default}' to reinstall the server files.\n"
 }
 
 
@@ -898,7 +908,7 @@ cmd_checkmods=( "chm;checkmods" "fn_check_mods" "Check Steam Workshop for mod up
 cmd_backup=( "b;backup" "fn_backup_dayz" "Create backup archives of the server (mpmission)." )
 cmd_wipe=( "wi;wipe" "fn_wipe_dayz" "Wipe your server data (Player and Storage)." )
 cmd_cleancache=( "cc;cleancache" "fn_clean_dayz" "Clear SteamCMD / workshop caches." )
-cmd_cleanserver=( "cs;cleanserver" "fn_clean_server" "DESTRUCTIVE: Delete the ENTIRE install (files, mods, profiles, backups, config, Steam cache); leaves only dayzserver.sh." )
+cmd_cleanserver=( "cs;cleanserver" "fn_clean_server" "Clean up server files (install, mods, profiles, backups). Keeps Steam login and config.ini; re-runnable." )
 
 ### Set specific opt here ###
 currentopt=( "${cmd_start[@]}" "${cmd_stop[@]}" "${cmd_restart[@]}" "${cmd_monitor[@]}" "${cmd_console[@]}" "${cmd_install[@]}" "${cmd_update[@]}" "${cmd_validate[@]}" "${cmd_workshop[@]}" "${cmd_updateconfig[@]}" "${cmd_checkmods[@]}" "${cmd_backup[@]}" "${cmd_wipe[@]}" "${cmd_cleancache[@]}" "${cmd_cleanserver[@]}" )
@@ -937,7 +947,7 @@ check_dependencies
 fn_checkscreen
 
 getopt=$1
-if [ ! -f "${HOME}/steamcmd/steamcmd.sh" ] || [ ! -f "${HOME}/serverfiles/DayZServer" ] && [ "${getopt}" != "cfg" ]; then
+if [ ! -f "${HOME}/steamcmd/steamcmd.sh" ] || [ ! -f "${HOME}/serverfiles/DayZServer" ] && [ "${getopt}" != "cfg" ] && [ "$maintenance_mode" != "1" ]; then
 	printf "[ ${yellow}INFO${default} ] No installed steamcmd and/or serverfiles found!\n"
 	chmod u+x ${HOME}/dayzserver
 	fn_install_dayz
