@@ -93,9 +93,12 @@ if [ "$maintenance_mode" != "1" ]; then
         chmod 600 "$CONFIG_FILE"
     fi
 
-    # Check if steamlogin is set to CHANGEME
+    # Check if steamlogin is still set to the default placeholder. Without a
+    # real Steam username SteamCMD cannot log in, so the server files silently
+    # fail to download - point the user straight at the value to change.
     if [ "$steamlogin" = "CHANGEME" ]; then
-        printf "[ ${red}Error${default} ] Please update ${CONFIG_FILE} before running this script again.\n"
+        printf "[ ${red}Error${default} ] The ${lightyellow}steamlogin${default} value in ${CONFIG_FILE} is still set to the default '${lightyellow}CHANGEME${default}'.\n"
+        printf "[ ${red}Error${default} ] Edit ${CONFIG_FILE} and set ${lightyellow}steamlogin${default} to your Steam username before running this script again.\n"
         exit 1
     fi
 fi
