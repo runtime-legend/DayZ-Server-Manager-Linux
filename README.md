@@ -91,21 +91,7 @@ You should see something like:
 UNCONN 0 0 0.0.0.0:2306
 ```
 
-### 5. Test the RCon connection
-
-Get the list of players:
-
-```bash
-bercon-cli \
-  --ip 127.0.0.1 \
-  --port 2306 \
-  --password 12345678 \
-  players
-```
-
-If everything is configured correctly, a table of players will appear.
-
-### 6. Useful commands
+### 5. Useful commands
 
 List players:
 
@@ -117,12 +103,6 @@ Run any RCon command:
 
 ```bash
 bercon-cli -i 127.0.0.1 -p 2306 -P 12345678 command "<command>"
-```
-
-For example:
-
-```bash
-bercon-cli -i 127.0.0.1 -p 2306 -P 12345678 command "players"
 ```
 
 ### Verifying it works
