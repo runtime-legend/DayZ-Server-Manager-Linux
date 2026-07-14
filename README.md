@@ -23,7 +23,7 @@ If you prefer to handle scheduled restarts and updates directly through Cron ins
 @reboot /home/dayz/dayzserver.sh start > /dev/null 2>&1
 */1 * * * * /home/dayz/dayzserver.sh monitor > /dev/null 2>&1
 0 */2 * * * /home/dayz/dayzserver.sh checkmods > /dev/null 2>&1
-0 */3 * * * /usr/local/bin/bercon-cli --ip 127.0.0.1 --port 2306 --password 12345678 "#shutdown"
+0 */3 * * * /usr/bin/bercon-cli --ip 127.0.0.1 --port 2306 --password 12345678 "#shutdown"
 # */30 * * * * /home/dayz/dayzserver.sh backup > /dev/null 2>&1
 ```
 
@@ -54,13 +54,7 @@ This configuration keeps crash recovery completely independent from Steam update
 The file is located in the server directory:
 
 ```
-~/serverfiles/battleye/baseserver_x64.cfg
-```
-
-or, after the first launch, an automatically generated file may be used instead:
-
-```
-~/serverfiles/battleye/beserver_x64_active_*.cfg
+~/serverfiles/battleye/beserver_x64.cfg
 ```
 
 Add (or edit) the following parameters:
@@ -69,6 +63,12 @@ Add (or edit) the following parameters:
 RConPassword 12345678
 RConPort 2306
 RestrictRCon 0
+```
+
+After the first launch, an automatically generated file may be used instead:
+
+```
+~/serverfiles/battleye/beserver_x64_active_*.cfg
 ```
 
 > Use your own strong password instead of `12345678`.
@@ -218,7 +218,7 @@ crontab -e
 Add a task to restart every 3 hours (00:00, 03:00, 06:00, ...):
 
 ```cron
-0 */3 * * * /usr/local/bin/bercon-cli --ip 127.0.0.1 --port 2306 --password 12345678 "#shutdown"
+0 */3 * * * /usr/bin/bercon-cli --ip 127.0.0.1 --port 2306 --password 12345678 "#shutdown"
 ```
 
-> If needed, replace `/usr/local/bin/bercon-cli` with the path returned by the `which bercon-cli` command.
+> If needed, replace `/usr/bin/bercon-cli` with the path returned by the `which bercon-cli` command.
