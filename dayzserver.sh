@@ -40,6 +40,9 @@ dayz_id=221100
 # Game Port (Not Steam QueryPort. Add/Change that in your serverDZ.cfg file)
 port=2301
 
+# Limit the server frame rate (FPS).
+limitFPS=60
+
 # IMPORTANT PARAMETERS
 steamlogin=CHANGEME
 config=serverDZ.cfg
@@ -59,28 +62,45 @@ discord_webhook_url=\"\"
 #servermods=\"\"
 
 # modify carefully! server won't start if syntax is corrupt!
-dayzparameter=\" -config=\${config} -port=\${port} -freezecheck \${BEpath} \${profiles} \${logs}\""
+dayzparameter=\" -config=\${config} -port=\${port} -limitFPS=\${limitFPS} -freezecheck \${BEpath} \${profiles} \${logs}\""
 
-# Check if the config.ini file exists
-if [ ! -f "$CONFIG_FILE" ]; then
-    printf "[ ${yellow}Warning${default} ] ${CONFIG_FILE} file not found.\n"
-    echo -e "$DEFAULT_CONFIG" > "$CONFIG_FILE"
-    printf "[ ${green}Fixed${default} ] Default ${lightyellow}${CONFIG_FILE}${default} created.\n"
-    printf "[ ${red}Important${default} ] Please edit the ${CONFIG_FILE} file before running this script again.\n"
-    chmod 600 "$CONFIG_FILE"
-    exit 1
-else
-    printf "[ ${green}Success${default} ] Config file found. Reading values...\n"
-    # Source the config file to load its variables
-    source "$CONFIG_FILE"
-    printf "[ ${green}Finished${default} ] Configuration file loaded.\n"
-    chmod 600 "$CONFIG_FILE"
-fi
+# Identify the command early. cleanserver only deletes files - it needs no
+# config.ini, no Steam login and no installed server files - so it must run in
+# any state. It therefore skips the setup gates below (config regeneration,
+# steamlogin check and the auto-install gate further down).
+getopt="$1"
+case "$getopt" in
+    cs|cleanserver) maintenance_mode=1 ;;
+    *)              maintenance_mode=0 ;;
+esac
 
-# Check if steamlogin is set to CHANGEME
-if [ "$steamlogin" = "CHANGEME" ]; then
-	printf "[ ${red}Error${default} ] Please update ${CONFIG_FILE} before running this script again.\n"
-	exit 1
+# Maintenance commands (cleanserver) only delete files - they load nothing and
+# print nothing here. Everything else loads config.ini and validates it.
+if [ "$maintenance_mode" != "1" ]; then
+    # Check if the config.ini file exists
+    if [ ! -f "$CONFIG_FILE" ]; then
+        printf "[ ${yellow}Warning${default} ] ${CONFIG_FILE} file not found.\n"
+        echo -e "$DEFAULT_CONFIG" > "$CONFIG_FILE"
+        printf "[ ${green}Fixed${default} ] Default ${lightyellow}${CONFIG_FILE}${default} created.\n"
+        printf "[ ${red}Important${default} ] Please edit the ${CONFIG_FILE} file before running this script again.\n"
+        chmod 600 "$CONFIG_FILE"
+        exit 1
+    else
+        printf "[ ${green}Success${default} ] Config file found. Reading values...\n"
+        # Source the config file to load its variables
+        source "$CONFIG_FILE"
+        printf "[ ${green}Finished${default} ] Configuration file loaded.\n"
+        chmod 600 "$CONFIG_FILE"
+    fi
+
+    # Check if steamlogin is still set to the default placeholder. Without a
+    # real Steam username SteamCMD cannot log in, so the server files silently
+    # fail to download - point the user straight at the value to change.
+    if [ "$steamlogin" = "CHANGEME" ]; then
+        printf "[ ${red}Error${default} ] The ${lightyellow}steamlogin${default} value in ${CONFIG_FILE} is still set to the default '${lightyellow}CHANGEME${default}'.\n"
+        printf "[ ${red}Error${default} ] Edit ${CONFIG_FILE} and set ${lightyellow}steamlogin${default} to your Steam username before running this script again.\n"
+        exit 1
+    fi
 fi
 
 fn_checkroot_dayz(){
@@ -140,12 +160,115 @@ fn_status_dayz(){
 }
 
 fn_clear_logs(){
-	# Delete *.RPT, *.log, and *.mdmp files from the profiles directory
+	# Delete *.RPT and *.log files from the profiles directory.
+	# IMPORTANT: *.mdmp (engine crash minidumps) are intentionally NOT deleted
+	# here — they are required to analyse engine crashes. Removing them would
+	# destroy the most valuable evidence about why the server died.
 	profiles_dir="${HOME}/serverprofile" # Update this path if necessary
 	if [ -d "${profiles_dir}" ]; then
-		find "${profiles_dir}" -type f \( -name "*.RPT" -o -name "*.log" -o -name "*.mdmp" \) -delete
-		printf "[ ${green}DayZ${default} ] Cleared old .RPT, .log, and .mdmp files from profiles directory.\n"
+		find "${profiles_dir}" -type f \( -name "*.RPT" -o -name "*.log" \) -delete
+		printf "[ ${green}DayZ${default} ] Cleared old .RPT and .log files (kept .mdmp) from profiles directory.\n"
 	fi
+}
+
+# ---------------------------------------------------------------------------
+# fn_log_monitor
+# Appends a timestamped event to ~/monitor.log (requirement #7).
+# The monitor log keeps a human-readable history of server lifecycle events:
+# startups, crash detection, automatic restarts and successful starts.
+# $1 — message text (may contain \n for multi-line entries).
+# ---------------------------------------------------------------------------
+fn_log_monitor(){
+	{
+		date '+%Y-%m-%d %H:%M:%S'
+		printf '%b\n' "$1"
+	} >> "${HOME}/monitor.log"
+}
+
+# ---------------------------------------------------------------------------
+# fn_write_launch_wrapper
+# Generates a small wrapper script used to start DayZServer (requirement #9).
+# The wrapper launches the server exactly like the original inline command and,
+# once the process exits, writes its return code to ~/last_exit_code.
+#
+# All launch parameters (dayzparameter/workshop/servermods/HOME) are expanded
+# now, at generation time, via an UNQUOTED heredoc, so the resulting launch
+# command — and therefore the server's runtime behaviour — is identical to the
+# original invocation. Only "$?" is escaped so it is evaluated by the wrapper
+# after the server terminates, not while the wrapper is being written.
+# ---------------------------------------------------------------------------
+fn_write_launch_wrapper(){
+	local wrapper="${HOME}/.dayz_launch_wrapper.sh"
+	cat > "${wrapper}" <<EOF
+#!/bin/bash
+# Auto-generated by dayzserver.sh — launches DayZServer and records its exit code.
+cd "${HOME}/serverfiles"
+./DayZServer ${dayzparameter} -mod="${workshop}" -servermod="${servermods}"
+echo \$? > "${HOME}/last_exit_code"
+EOF
+	chmod +x "${wrapper}"
+}
+
+# ---------------------------------------------------------------------------
+# fn_collect_crashlogs
+# Collects the most complete diagnostic snapshot possible when the monitor
+# detects that the server crashed (requirements #1, #2, #4, #5, #6, #10).
+# Called from the monitor BEFORE the automatic restart so nothing is
+# overwritten. Everything is stored in ~/crashlogs/YYYY-MM-DD_HH-MM-SS/.
+# ---------------------------------------------------------------------------
+fn_collect_crashlogs(){
+	# --- #1. Timestamped crash directory -----------------------------------
+	local crash_ts crash_dir
+	crash_ts="$(date +%Y-%m-%d_%H-%M-%S)"
+	crash_dir="${HOME}/crashlogs/${crash_ts}"
+	mkdir -p "${crash_dir}"
+	printf "[ ${yellow}DayZ${default} ] Collecting crash diagnostics into ${crash_dir}\n"
+
+	# --- #2. Save the latest RPT (full copy + last 500 lines) --------------
+	local profiles_dir="${HOME}/serverprofile"
+	local latest_rpt=""
+	if [ -d "${profiles_dir}" ]; then
+		# Find the most recently modified .RPT file.
+		latest_rpt="$(find "${profiles_dir}" -type f -name "*.RPT" -printf '%T@ %p\n' 2>/dev/null \
+			| sort -nr | head -n1 | cut -d' ' -f2-)"
+	fi
+	if [ -n "${latest_rpt}" ] && [ -f "${latest_rpt}" ]; then
+		cp -f "${latest_rpt}" "${crash_dir}/DayZServer.rpt"
+		tail -n 500 "${latest_rpt}" > "${crash_dir}/DayZServer_last500.log"
+	else
+		echo "No .RPT file found in ${profiles_dir}" > "${crash_dir}/DayZServer_last500.log"
+	fi
+
+	# --- #4. System state: free -h, ps aux --sort=-rss, df -h --------------
+	{
+		echo "===== free -h ====="
+		free -h 2>&1
+		echo
+		echo "===== ps aux --sort=-rss (top 30) ====="
+		# head -n 31 keeps the header line plus the first 30 processes.
+		ps aux --sort=-rss 2>&1 | head -n 31
+		echo
+		echo "===== df -h ====="
+		df -h 2>&1
+	} > "${crash_dir}/system_state.log" 2>&1
+
+	# --- #5. journalctl (must never fail the run on missing permissions) ---
+	journalctl --since "10 minutes ago" > "${crash_dir}/journal.log" 2>&1 \
+		|| echo "journalctl unavailable or insufficient permissions" > "${crash_dir}/journal.log"
+
+	# --- #6. dmesg ---------------------------------------------------------
+	dmesg -T > "${crash_dir}/dmesg.log" 2>&1 \
+		|| echo "dmesg unavailable or insufficient permissions" > "${crash_dir}/dmesg.log"
+
+	# --- #10. Archive tmux console log and last exit code ------------------
+	if [ -f "${HOME}/tmux.log" ]; then
+		cp -f "${HOME}/tmux.log" "${crash_dir}/tmux.log"
+	fi
+	if [ -f "${HOME}/last_exit_code" ]; then
+		cp -f "${HOME}/last_exit_code" "${crash_dir}/last_exit_code"
+	fi
+
+	printf "[ ${green}DayZ${default} ] Crash diagnostics saved to ${crash_dir}\n"
 }
 
 
@@ -156,18 +279,42 @@ fn_start_dayz(){
 		exit 1
 	else
                 fn_backup_dayz
-                # fn_update_dayz and fn_workshop_mods moved to the dedicated `u` / `ws`
-                # commands so start/restart paths stay fast and have no Steam dependency.
-                # Run `./dayzserver.sh u` manually or via a daily cron to apply updates.
+                # If a previous `chm` run found mod updates on the workshop, apply
+                # them now before starting so clients don't get version-mismatched.
+                if [ -f "${HOME}/update_pending" ]; then
+                    printf "[ ${yellow}DayZ${default} ] Pending mod updates detected; applying before start...\n"
+                    fn_workshop_mods
+                    rm -f "${HOME}/update_pending"
+                    printf "[ ${green}DayZ${default} ] Mod updates applied; flag cleared.\n"
+                fi
+                # `u` (server update) is still a dedicated command — run it manually
+                # or via cron to pick up DayZServer binary updates.
                 fn_clear_logs
 		printf "[ ${green}DayZ${default} ] Starting server...\n"
 		sleep 0.5
 		sleep 0.5
 		cd ${HOME}/serverfiles
-		tmux new-session -d -x 23 -y 80 -s $(whoami)-tmux ./DayZServer $dayzparameter -mod="$workshop" -servermod="$servermods"
+		# --- #9. Launch through a wrapper so the server's exit code is saved.
+		# The wrapper runs the exact same launch command as before, then writes
+		# the process return code to ~/last_exit_code once the server exits.
+		fn_write_launch_wrapper
+		# Start a fresh console log for this session (#8). It is copied into the
+		# crash directory before every restart, so truncating here is safe and
+		# keeps ~/tmux.log from growing without bound across restarts.
+		: > "${HOME}/tmux.log"
+		tmux new-session -d -x 23 -y 80 -s $(whoami)-tmux "${HOME}/.dayz_launch_wrapper.sh"
 		sleep 1
+		# --- #8. Pipe the DayZ console output of the tmux pane into ~/tmux.log.
+		tmux pipe-pane -t $(whoami)-tmux -o "cat >> ${HOME}/tmux.log" 2>/dev/null
 		cd ${HOME}
 		date > ${HOME}/.dayzlockfile
+		# --- #7. Record the (successful) start in the monitor log.
+		fn_status_dayz
+		if [ "${dayzstatus}" == "1" ]; then
+			fn_log_monitor "Server started successfully."
+		else
+			fn_log_monitor "Server start attempted (session not detected yet)."
+		fi
 	fi
 }
 
@@ -210,6 +357,12 @@ fn_monitor_dayz(){
 	if [ ! -f ".dayzlockupdate" ]; then
 		fn_status_dayz
 		if [ "${dayzstatus}" == "0" ] && [ -f "${HOME}/.dayzlockfile" ]; then
+			# The lockfile exists (server was meant to be running) but no tmux
+			# session is present — the server crashed rather than being stopped
+			# manually. Record the event and gather full diagnostics BEFORE the
+			# automatic restart overwrites/clears anything (#1, #7).
+			fn_log_monitor "Server crashed.\nRestart initiated."
+			fn_collect_crashlogs
 			fn_restart_dayz
 		elif [ "${dayzstatus}" != "0" ] && [ -f "${HOME}/.dayzlockfile" ]; then
 			printf "[ ${lightblue}INFO${default} ] Server should be online!\n"
@@ -355,6 +508,7 @@ fn_workshop_mods(){
     echo "[ DayZ ] Downloading workshop mods..."
 
     local updated_workshop_cfg=""
+    local -a successful_mods=()
 
     for i in "${workshopID[@]}"; do
         # Strip surrounding whitespace; skip empty lines.
@@ -372,32 +526,62 @@ fn_workshop_mods(){
 
         echo "[ INFO ] Downloading mod $mod_id"
 
+        local mod_meta_file="${workshopfolder}/${mod_id}/meta.cpp"
+        local steamcmd_log
+        steamcmd_log=$(mktemp -t steamcmd.XXXXXX.log) || steamcmd_log="${HOME}/.steamcmd_last.log"
+
         success=0
         for attempt in {1..5}; do
             echo "[ INFO ] Attempt $attempt for mod $mod_id"
 
+            : > "$steamcmd_log"
             ${HOME}/steamcmd/steamcmd.sh \
                 +force_install_dir ${HOME}/serverfiles \
                 +login "${steamlogin}" \
                 +workshop_download_item "${dayz_id}" "$mod_id" validate \
-                +quit
+                +quit 2>&1 | tee "$steamcmd_log"
 
-            if [ -d "${workshopfolder}/${mod_id}" ] && [ "$(ls -A "${workshopfolder}/${mod_id}" 2>/dev/null)" ]; then
+            # SteamCMD prints "Success. Downloaded item <id> to ..." only on a real success.
+            # A non-empty mod folder is NOT a reliable signal because timeouts leave partial
+            # content behind. Require BOTH the success line AND meta.cpp present.
+            if grep -q "Success\. Downloaded item ${mod_id}" "$steamcmd_log" && [ -f "$mod_meta_file" ]; then
                 echo "[ OK ] Mod $mod_id downloaded"
                 success=1
                 break
             fi
 
-            echo "[ WARN ] Failed attempt $attempt for mod $mod_id"
+            if grep -q "Timeout downloading item ${mod_id}" "$steamcmd_log"; then
+                echo "[ WARN ] SteamCMD timeout on attempt $attempt for mod $mod_id"
+            elif grep -qE "ERROR! .*${mod_id}" "$steamcmd_log"; then
+                echo "[ WARN ] SteamCMD reported an error on attempt $attempt for mod $mod_id"
+            else
+                echo "[ WARN ] Attempt $attempt incomplete for mod $mod_id (no meta.cpp)"
+            fi
+
+            # Wipe the partial folder so the next attempt starts from a clean state.
+            if [ -d "${workshopfolder}/${mod_id}" ]; then
+                rm -rf "${workshopfolder}/${mod_id}"
+            fi
+
             sleep 5
         done
 
+        rm -f "$steamcmd_log"
+
         if [ "$success" -ne 1 ]; then
             echo "[ ERROR ] Failed to download mod $mod_id after 5 attempts"
+            # Drop any partial folder left behind so we don't symlink to garbage on the next pass.
+            if [ -d "${workshopfolder}/${mod_id}" ]; then
+                rm -rf "${workshopfolder}/${mod_id}"
+            fi
             # Preserve the existing cfg line so we don't lose a user-provided name.
             updated_workshop_cfg+="${mod_id}${mod_name_from_cfg:+ }${mod_name_from_cfg}"$'\n'
             continue
         fi
+
+        # Track mods that fully downloaded so fn_refresh_remote_timestamps below
+        # only updates the baseline for what actually landed on disk.
+        successful_mods+=("$mod_id")
 
         # Resolve the mod's display name. Priority: meta.cpp > workshop.cfg > bare mod_id.
         local mod_meta_file="${workshopfolder}/$mod_id/meta.cpp"
@@ -477,33 +661,283 @@ fn_workshop_mods(){
         cp -vu "$dir"/*.bikey "${HOME}/serverfiles/keys/" 2>/dev/null
     done
 
-    echo "[ DayZ ] Aktualna lista modów:"
+    echo "[ DayZ ] Current mod list:"
     echo "----------------------------------------"
     for link in "${HOME}/serverfiles"/@*; do
         [ -L "$link" ] && basename "$link"
     done | sort
     echo "----------------------------------------"
 
-    # Budowanie linii startowej - czytamy nazwę z pliku i dodajemy do niej @
-    local mod_line=""
-    while read -r line; do
-        [ -z "$line" ] && continue
-        local name_part=$(echo "$line" | cut -d' ' -f2-)
-        [ -z "$name_part" ] && continue
-        [ "$name_part" = "$(echo "$line" | awk '{print $1}')" ] && continue
+    # The workshop= line in config.ini is no longer touched automatically here.
+    # Run "$0 updateconfig" (uc) manually to regenerate it from workshop.cfg.
+    printf "[ ${cyan}INFO${default} ] Run '${lightblue}$0 updateconfig${default}' to update the workshop= line in ${CONFIG_FILE}.\n"
 
-        if [ -z "$mod_line" ]; then
-            mod_line="@${name_part}"
-        else
-            mod_line="${mod_line};@${name_part}"
-        fi
-    done < "$workshop_cfg"
+    # Refresh the remote-timestamp baseline for everything that actually downloaded.
+    # fn_check_mods compares against this file to decide if a future workshop
+    # version is newer than what we currently have on disk.
+    if [ ${#successful_mods[@]} -gt 0 ]; then
+        fn_refresh_remote_timestamps "${successful_mods[@]}"
+    fi
 
-    echo "[ DayZ ] Gotowa linia modów do config.ini (workshop=\"...\"):"
-    echo -e "${mod_line}"
-    echo "----------------------------------------"
+    # We just applied whatever was pending; clear the flag the checkmods cron sets.
+    rm -f "${HOME}/update_pending"
 
     echo "[ OK ] Workshop mods done"
+}
+
+# Refresh ~/mod_remote_timestamps.json with the workshop time_updated for each
+# given mod ID. Establishes the baseline that fn_check_mods compares against.
+fn_refresh_remote_timestamps(){
+    local remote_ts="${HOME}/mod_remote_timestamps.json"
+    [ -f "$remote_ts" ] || echo "{}" > "$remote_ts"
+
+    [ "$#" -gt 0 ] || return 0
+
+    local -a curl_args=(-s --max-time 15 -X POST
+        "https://api.steampowered.com/ISteamRemoteStorage/GetPublishedFileDetails/v1/")
+    curl_args+=(-d "itemcount=$#")
+    local i=0
+    for id in "$@"; do
+        curl_args+=(-d "publishedfileids[$i]=$id")
+        i=$((i + 1))
+    done
+
+    local response
+    response=$(curl "${curl_args[@]}" 2>/dev/null)
+    if [ -z "$response" ]; then
+        printf "[ ${yellow}WARN${default} ] Steam API unreachable; baseline not refreshed.\n"
+        return 1
+    fi
+
+    local updates
+    updates=$(echo "$response" | jq -c '
+        [.response.publishedfiledetails[]?
+         | select(.result == 1)
+         | {key: (.publishedfileid|tostring), value: (.time_updated // 0)}]
+        | from_entries // {}')
+    if [ -z "$updates" ] || [ "$updates" = "null" ]; then
+        return 1
+    fi
+
+    jq --argjson updates "$updates" '. * $updates' "$remote_ts" > "${remote_ts}.tmp" \
+        && mv "${remote_ts}.tmp" "$remote_ts"
+}
+
+# Lightweight check: queries Steam Workshop for each mod's current time_updated
+# and compares it to the baseline in ~/mod_remote_timestamps.json. If any are
+# newer, touches ~/update_pending so the next start applies the updates.
+# Designed to run on a frequent cron (e.g. every 2h) so update detection is
+# cheap and doesn't tie up the server with downloads.
+fn_check_mods(){
+    local workshop_cfg="${HOME}/workshop.cfg"
+    local remote_ts="${HOME}/mod_remote_timestamps.json"
+    local flag_file="${HOME}/update_pending"
+
+    if [ ! -f "$workshop_cfg" ] || [ ! -s "$workshop_cfg" ]; then
+        printf "[ ${lightblue}INFO${default} ] No mods configured; nothing to check.\n"
+        return 0
+    fi
+
+    local -a mod_ids=()
+    while read -r line; do
+        line=$(echo "$line" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+        [ -z "$line" ] && continue
+        local id
+        id=$(echo "$line" | awk '{print $1}')
+        [[ "$id" =~ ^[0-9]+$ ]] && mod_ids+=("$id")
+    done < "$workshop_cfg"
+
+    if [ ${#mod_ids[@]} -eq 0 ]; then
+        printf "[ ${lightblue}INFO${default} ] No valid mod IDs in workshop.cfg.\n"
+        return 0
+    fi
+
+    [ -f "$remote_ts" ] || echo "{}" > "$remote_ts"
+
+    local -a curl_args=(-s --max-time 15 -X POST
+        "https://api.steampowered.com/ISteamRemoteStorage/GetPublishedFileDetails/v1/")
+    curl_args+=(-d "itemcount=${#mod_ids[@]}")
+    local i=0
+    for id in "${mod_ids[@]}"; do
+        curl_args+=(-d "publishedfileids[$i]=$id")
+        i=$((i + 1))
+    done
+
+    local response
+    response=$(curl "${curl_args[@]}" 2>/dev/null)
+    if [ -z "$response" ]; then
+        printf "[ ${yellow}WARN${default} ] Steam API unreachable; skipping check.\n"
+        return 1
+    fi
+
+    local -a updated_mods=()
+    while IFS=$'\t' read -r pid tupdated; do
+        [ -z "$pid" ] && continue
+        local stored
+        stored=$(jq -r --arg p "$pid" '.[$p] // 0' "$remote_ts")
+        if [ "$tupdated" -gt "$stored" ]; then
+            updated_mods+=("$pid")
+        fi
+    done < <(echo "$response" | jq -r '
+        .response.publishedfiledetails[]?
+        | select(.result == 1)
+        | "\(.publishedfileid)\t\(.time_updated // 0)"')
+
+    if [ ${#updated_mods[@]} -gt 0 ]; then
+        date > "$flag_file"
+        printf "[ ${yellow}DayZ${default} ] %d mod update(s) available. Flagged for next start.\n" "${#updated_mods[@]}"
+        for m in "${updated_mods[@]}"; do
+            printf "  - %s\n" "$m"
+        done
+        if [ -n "$discord_webhook_url" ]; then
+            local mod_list
+            mod_list=$(printf "%s, " "${updated_mods[@]}" | sed 's/, $//')
+            curl -sS -H "Content-Type: application/json" -X POST \
+                -d "{\"content\": \"Mod updates available: ${mod_list}. Will apply on next restart.\"}" \
+                "$discord_webhook_url" >/dev/null || true
+        fi
+    else
+        printf "[ ${green}OK${default} ] No mod updates available.\n"
+    fi
+}
+
+# Build the workshop="@..." line from workshop.cfg and write it into config.ini,
+# replacing any existing (commented or uncommented) workshop= line.
+fn_update_workshop_line(){
+    local workshop_cfg="${HOME}/workshop.cfg"
+    local config_file="${CONFIG_FILE}"
+
+    if [ ! -f "$config_file" ]; then
+        printf "[ ${yellow}WARN${default} ] Config file ${config_file} not found - cannot update workshop line.\n"
+        return 1
+    fi
+
+    local mod_line=""
+    local -a skipped=()
+    if [ -f "$workshop_cfg" ]; then
+        while read -r line; do
+            line=$(echo "$line" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+            [ -z "$line" ] && continue
+
+            local mod_id_part name_part
+            mod_id_part=$(echo "$line" | awk '{print $1}')
+            name_part=$(echo "$line" | cut -d' ' -f2-)
+
+            # Skip lines without a resolved mod name.
+            [ -z "$name_part" ] && continue
+            [ "$name_part" = "$mod_id_part" ] && continue
+
+            # Only include mods that are actually installed and loadable. The
+            # @<name> symlink in serverfiles must resolve to a folder that holds
+            # at least one addons/*.pbo - that's what the engine loads. If the
+            # download failed or is incomplete the symlink is missing or empty,
+            # and listing it would crash the server on start, so we skip it.
+            local mod_link="${HOME}/serverfiles/@${name_part}"
+            if [ ! -e "$mod_link" ]; then
+                printf "[ ${yellow}WARN${default} ] Skipping @%s (id %s): not installed.\n" "$name_part" "$mod_id_part"
+                skipped+=("@${name_part}")
+                continue
+            fi
+            local pbo has_pbo=0
+            for pbo in "${mod_link}/addons/"*.pbo; do
+                [ -e "$pbo" ] && { has_pbo=1; break; }
+            done
+            if [ "$has_pbo" -ne 1 ]; then
+                printf "[ ${yellow}WARN${default} ] Skipping @%s (id %s): no addons/*.pbo (incomplete download).\n" "$name_part" "$mod_id_part"
+                skipped+=("@${name_part}")
+                continue
+            fi
+
+            if [ -z "$mod_line" ]; then
+                mod_line="@${name_part}"
+            else
+                mod_line="${mod_line};@${name_part}"
+            fi
+        done < "$workshop_cfg"
+    fi
+
+    # Replace any existing workshop= line (with or without leading #), otherwise append one.
+    if grep -qE '^[[:space:]]*#?[[:space:]]*workshop[[:space:]]*=' "$config_file"; then
+        # Use | as sed delimiter so @ and ; in the value don't conflict.
+        sed -i.bak -E "s|^[[:space:]]*#?[[:space:]]*workshop[[:space:]]*=.*|workshop=\"${mod_line}\"|" "$config_file"
+        rm -f "${config_file}.bak"
+        printf "[ ${green}OK${default} ] Updated workshop= line in ${config_file}\n"
+    else
+        printf 'workshop="%s"\n' "$mod_line" >> "$config_file"
+        printf "[ ${green}OK${default} ] Added workshop= line to ${config_file}\n"
+    fi
+
+    printf "[ ${cyan}INFO${default} ] workshop=\"${green}${mod_line}${default}\"\n"
+
+    # Loudly report anything that was left out so a missing mod isn't silently
+    # dropped from the server. Notify Discord too, if configured.
+    if [ ${#skipped[@]} -gt 0 ]; then
+        local skipped_list
+        skipped_list=$(printf "%s, " "${skipped[@]}" | sed 's/, $//')
+        printf "[ ${yellow}WARN${default} ] %d mod(s) excluded (not installed/incomplete): ${yellow}%s${default}\n" "${#skipped[@]}" "$skipped_list"
+        if [ -n "$discord_webhook_url" ]; then
+            curl -sS -H "Content-Type: application/json" -X POST \
+                -d "{\"content\": \"Excluded from config.ini (not installed/incomplete): ${skipped_list}. Re-run mod download.\"}" \
+                "$discord_webhook_url" >/dev/null || true
+        fi
+    fi
+}
+
+# Clean up the DayZ server files: server install, mods, profiles, backups,
+# config.ini and the script's own state/lock files. This only deletes - it does
+# NOT regenerate config.ini or redownload the server, so it is safe to run any
+# number of times.
+# PRESERVED on purpose:
+#   - dayzserver.sh itself
+#   - the Steam authorization (${HOME}/Steam, ${HOME}/.steam) so you stay logged
+#     in and don't have to re-authenticate after a cleanup
+fn_clean_server(){
+    printf "[ ${red}WARNING${default} ] This will DELETE the DayZ server files (install, mods, profiles, backups, ${CONFIG_FILE}).\n"
+    printf "[ ${lightblue}INFO${default} ] Steam authorization is preserved.\n"
+
+    # Make sure the server isn't running while we delete its files.
+    fn_status_dayz
+    if [ "${dayzstatus}" == "1" ]; then
+        printf "[ ${yellow}DayZ${default} ] Server is running; stopping it first...\n"
+        fn_stop_dayz
+    fi
+
+    # Server files created by the script / SteamCMD. The Steam client dirs
+    # (${HOME}/Steam, ${HOME}/.steam) are intentionally NOT listed so the saved
+    # login survives. The user's own dotfiles are likewise untouched.
+    local -a dayz_dirs=(
+        "${HOME}/serverfiles"
+        "${HOME}/serverprofile"
+        "${HOME}/steamcmd"
+        "${HOME}/backup"
+    )
+    local -a dayz_files=(
+        "${HOME}/${CONFIG_FILE}"
+        "${HOME}/workshop.cfg"
+        "${HOME}/mod_timestamps.json"
+        "${HOME}/mod_remote_timestamps.json"
+        "${HOME}/update_pending"
+        "${HOME}/.dayzlockfile"
+        "${HOME}/.dayzlockupdate"
+        "${HOME}/.steamcmd_last.log"
+    )
+
+    local d f
+    for d in "${dayz_dirs[@]}"; do
+        if [ -d "$d" ] || [ -L "$d" ]; then
+            rm -rf "$d"
+            printf "[ ${green}OK${default} ] Removed ${d}\n"
+        fi
+    done
+
+    for f in "${dayz_files[@]}"; do
+        if [ -e "$f" ] || [ -L "$f" ]; then
+            rm -f "$f"
+            printf "[ ${green}OK${default} ] Removed ${f}\n"
+        fi
+    done
+
+    printf "[ ${green}DayZ${default} ] Cleanup complete. Steam authorization preserved.\n"
 }
 
 
@@ -564,18 +998,27 @@ fn_wipe_dayz(){
 }
 
 fn_clean_dayz(){
-	printf "[ ${magenta}...${default} ] Clearing SteamCMD / workshop caches...\n"
+	printf "[ ${magenta}...${default} ] Clearing SteamCMD / workshop caches (login is preserved)...\n"
 
-	rm -rf "${HOME}/Steam/appcache"
-	printf "[ ${green}OK${default} ] Removed ${HOME}/Steam/appcache\n"
+	# App-info metadata cache. Remove ONLY the metadata vdf files, not the whole
+	# appcache directory - this forces SteamCMD to re-fetch fresh version info
+	# without disturbing the saved login. The authorization/sentry lives in
+	# ${HOME}/Steam/config (config.vdf, loginusers.vdf) and ssfn* files, which we
+	# never touch, so the user stays signed in.
+	rm -f "${HOME}/Steam/appcache/appinfo.vdf" "${HOME}/Steam/appcache/packageinfo.vdf"
+	printf "[ ${green}OK${default} ] Cleared Steam appinfo/packageinfo metadata cache\n"
 
+	# Partial / interrupted downloads (game + workshop).
 	rm -rf "${HOME}/serverfiles/steamapps/downloading"
-	printf "[ ${green}OK${default} ] Removed ${HOME}/serverfiles/steamapps/downloading\n"
+	rm -rf "${HOME}/serverfiles/steamapps/workshop/downloads"
+	rm -rf "${HOME}/serverfiles/steamapps/workshop/temp"
+	printf "[ ${green}OK${default} ] Removed partial download caches\n"
 
+	# Workshop manifest for this app (forces a clean re-check of mod state).
 	rm -f "${HOME}/serverfiles/steamapps/workshop/appworkshop_${dayz_id}.acf"
 	printf "[ ${green}OK${default} ] Removed ${HOME}/serverfiles/steamapps/workshop/appworkshop_${dayz_id}.acf\n"
 
-	printf "[ ${green}DayZ${default} ] Cache cleared.\n"
+	printf "[ ${green}DayZ${default} ] Cache cleared. Steam login preserved.\n"
 }
 
 cmd_start=( "st;start" "fn_start_dayz" "Start the server." )
@@ -587,12 +1030,15 @@ cmd_install=( "i;install" "fn_install_dayz" "Install steamcmd and DayZ Server-Fi
 cmd_update=( "u;update" "fn_update_dayz" "Check and apply any server updates." )
 cmd_validate=( "v;validate" "fn_validate_dayz" "Validate server files with SteamCMD." )
 cmd_workshop=( "ws;workshop" "fn_workshop_mods" "Download Mods from Steam Workshop." )
+cmd_updateconfig=( "uc;updateconfig" "fn_update_workshop_line" "Rebuild the workshop= line in config.ini from workshop.cfg." )
+cmd_checkmods=( "chm;checkmods" "fn_check_mods" "Check Steam Workshop for mod updates; flags pending updates for the next start." )
 cmd_backup=( "b;backup" "fn_backup_dayz" "Create backup archives of the server (mpmission)." )
 cmd_wipe=( "wi;wipe" "fn_wipe_dayz" "Wipe your server data (Player and Storage)." )
-cmd_clean=( "cl;clean" "fn_clean_dayz" "Clear SteamCMD / workshop caches." )
+cmd_cleancache=( "cc;cleancache" "fn_clean_dayz" "Clear SteamCMD / workshop caches." )
+cmd_cleanserver=( "cs;cleanserver" "fn_clean_server" "Clean up server files (install, mods, profiles, backups, config). Keeps Steam authorization; re-runnable." )
 
 ### Set specific opt here ###
-currentopt=( "${cmd_start[@]}" "${cmd_stop[@]}" "${cmd_restart[@]}" "${cmd_monitor[@]}" "${cmd_console[@]}" "${cmd_install[@]}" "${cmd_update[@]}" "${cmd_validate[@]}" "${cmd_workshop[@]}" "${cmd_backup[@]}" "${cmd_wipe[@]}" "${cmd_clean[@]}" )
+currentopt=( "${cmd_start[@]}" "${cmd_stop[@]}" "${cmd_restart[@]}" "${cmd_monitor[@]}" "${cmd_console[@]}" "${cmd_install[@]}" "${cmd_update[@]}" "${cmd_validate[@]}" "${cmd_workshop[@]}" "${cmd_updateconfig[@]}" "${cmd_checkmods[@]}" "${cmd_backup[@]}" "${cmd_wipe[@]}" "${cmd_cleancache[@]}" "${cmd_cleanserver[@]}" )
 
 ### Build list of available commands
 optcommands=()
@@ -624,11 +1070,12 @@ fn_opt_usage(){
 
 # start functions
 fn_checkroot_dayz
-check_dependencies
+# cleanserver just deletes files; skip the dependency check (and its output).
+[ "$maintenance_mode" = "1" ] || check_dependencies
 fn_checkscreen
 
 getopt=$1
-if [ ! -f "${HOME}/steamcmd/steamcmd.sh" ] || [ ! -f "${HOME}/serverfiles/DayZServer" ] && [ "${getopt}" != "cfg" ]; then
+if [ ! -f "${HOME}/steamcmd/steamcmd.sh" ] || [ ! -f "${HOME}/serverfiles/DayZServer" ] && [ "${getopt}" != "cfg" ] && [ "$maintenance_mode" != "1" ]; then
 	printf "[ ${yellow}INFO${default} ] No installed steamcmd and/or serverfiles found!\n"
 	chmod u+x ${HOME}/dayzserver
 	fn_install_dayz
