@@ -54,7 +54,7 @@ This configuration keeps crash recovery completely independent from Steam update
 The file is located in the server directory:
 
 ```
-~/serverfiles/battleye/beserver_x64.cfg
+nano serverfiles/battleye/beserver_x64.cfg
 ```
 
 Add (or edit) the following parameters:
