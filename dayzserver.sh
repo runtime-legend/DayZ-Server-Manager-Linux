@@ -43,6 +43,11 @@ port=2301
 # Limit the server frame rate (FPS).
 limitFPS=60
 
+# Seconds to wait after stopping before starting again on a restart, so Steam
+# releases the query port / master-server slot and the server re-registers
+# cleanly. Prevents the \"server is invisible after a restart\" issue. Default 20.
+restart_settle=20
+
 # IMPORTANT PARAMETERS
 steamlogin=CHANGEME
 config=serverDZ.cfg
@@ -347,13 +352,61 @@ fn_stop_dayz(){
 	fi
 }
 
+# ---------------------------------------------------------------------------
+# fn_wait_server_down
+# Blocks until no DayZServer process owned by this user is left running, then
+# gives Steam a moment to deregister the old server from the master list.
+#
+# This is the fix for the "server is invisible after a restart" bug: relaunching
+# the engine before the previous instance has released its Steam query port (and
+# before the master server has dropped the stale registration) leaves the new
+# server up but absent from the in-game browser until the following restart.
+# ---------------------------------------------------------------------------
+fn_wait_server_down(){
+	local waited=0
+	# Wait up to 30s for the DayZServer process itself to exit. The tmux
+	# session usually dies first, but the process can linger a moment longer.
+	while pgrep -u "$(whoami)" -x DayZServer >/dev/null 2>&1; do
+		printf "\r[ ${magenta}...${default} ] Waiting for DayZServer to exit: ${waited}s"
+		sleep 1
+		waited=$((waited + 1))
+		if [ "${waited}" -ge 30 ]; then
+			printf "\n[ ${yellow}DayZ${default} ] DayZServer still running after 30s; forcing kill.\n"
+			pkill -u "$(whoami)" -x DayZServer 2>/dev/null
+			sleep 2
+			break
+		fi
+	done
+	[ "${waited}" -gt 0 ] && printf "\r[ ${green}OK${default} ] DayZServer process gone.            \n"
+
+	# Settle delay so Steam releases the query port / master-server slot before
+	# we start again. Override with `restart_settle=<seconds>` in config.ini.
+	local settle="${restart_settle:-20}"
+	printf "[ ${magenta}...${default} ] Waiting ${settle}s for Steam to release the server before restart...\n"
+	sleep "${settle}"
+}
+
 fn_restart_dayz(){
 	fn_stop_dayz
-	sleep 1
+	# Do NOT relaunch immediately - wait for the process to be fully gone and
+	# for Steam to let go, otherwise the new server registers late (or not at
+	# all) and stays invisible in the server browser.
+	fn_wait_server_down
 	fn_start_dayz
 }
 
 fn_monitor_dayz(){
+	# Serialise monitor runs. Crash collection + the settle delay before a
+	# restart can take longer than the 1-minute cron interval, so without a lock
+	# a second monitor run could enter the crash branch and fire a duplicate
+	# restart (two crashlogs folders, a half-started/invisible server). flock
+	# with -n makes any overlapping run exit immediately.
+	exec 9>"${HOME}/.dayzmonitor.lock"
+	if ! flock -n 9; then
+		printf "[ ${yellow}INFO${default} ] Another monitor run is in progress; skipping.\n"
+		return 0
+	fi
+
 	if [ ! -f ".dayzlockupdate" ]; then
 		fn_status_dayz
 		if [ "${dayzstatus}" == "0" ] && [ -f "${HOME}/.dayzlockfile" ]; then

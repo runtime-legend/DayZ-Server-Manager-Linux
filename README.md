@@ -23,21 +23,32 @@ If you prefer to handle scheduled restarts and updates directly through Cron ins
 @reboot /home/dayz/dayzserver.sh start > /dev/null 2>&1
 */1 * * * * /home/dayz/dayzserver.sh monitor > /dev/null 2>&1
 0 */2 * * * /home/dayz/dayzserver.sh checkmods > /dev/null 2>&1
-0 */3 * * * /usr/bin/bercon-cli --ip 127.0.0.1 --port 2306 --password 12345678 "#shutdown"
+0 */3 * * * /home/dayz/dayzserver.sh restart > /dev/null 2>&1
 # */30 * * * * /home/dayz/dayzserver.sh backup > /dev/null 2>&1
 ```
 
 Explanation:
 
 * @reboot – Automatically starts the DayZ server when the system boots.
-* monitor – Runs every minute and restarts the server if it crashes or is shut down through supported restart methods.
+* monitor – Runs every minute and restarts the server if it crashes. Overlapping runs are prevented with a lock, so it never fires a duplicate restart. When it brings the server back up, it waits for the old process to fully exit and for a short settle period before starting again (see the note below).
 * checkmods – Runs every 2 hours and checks for available DayZ server or Workshop mod updates. If updates are detected, an update flag is created and the updates will be installed automatically during the next server restart.
-* bercon-cli "#shutdown" – Performs a scheduled server shutdown via BattlEye RCon every 3 hours. If the server runs as a `systemd` service with `Restart=always` (or the `monitor` task is active), it will be automatically started again, installing any pending updates before startup.
+* restart – Performs a scheduled restart every 3 hours. The script stops the server gracefully, waits for the process to fully exit and for a short settle period, then starts it again (applying any pending mod updates). This is the recommended way to schedule restarts — it does not depend on RCon.
 * backup – Optional periodic backup task (disabled by default).
 
 Replace /home/dayz/ with the actual home directory of the Linux user running the server.
 
 This configuration keeps crash recovery completely independent from Steam update checks while still allowing updates to be installed automatically during the next scheduled restart.
+
+> **Restart timing (fixes "server is invisible after a restart")**
+> When the server comes back up after a shutdown or crash, the script waits for the old `DayZServer` process to fully exit and then pauses for a short **settle period** before starting again. Relaunching too quickly does not give Steam time to release the query port and drop the old master-server registration, which leaves the new server running but **invisible in the in-game browser** until the next restart. The settle wait prevents that.
+
+### Tuning the restart settle time
+
+The script waits `restart_settle` seconds (default **20**) before starting the server again, giving Steam time to release it so it re-registers cleanly. If your server is heavily modded and still appears late in the browser, increase it in `config.ini`:
+
+```ini
+restart_settle=30
+```
 
 ---
 
@@ -173,9 +184,9 @@ bercon-cli \
 
 If a list of players is displayed, the RCON connection is configured correctly.
 
-### Shutting down the server
+### Manually shutting down the server via RCON (optional)
 
-To shut down the server gracefully via RCON, use the following command:
+You can shut the server down over RCON with:
 
 ```bash
 bercon-cli \
@@ -185,11 +196,11 @@ bercon-cli \
   "#shutdown"
 ```
 
-After receiving the command, the server will shut down. If it runs as a `systemd` service with `Restart=always`, it will be automatically started again.
+> **Note:** This is only for manual/ad-hoc use. Do **not** use `bercon-cli "#shutdown"` in cron for scheduled restarts — sending `#shutdown` over RCon bypasses the script's stop logic, so the `monitor` task treats the planned restart as a crash (creating a `crashlogs` folder every cycle). For scheduled restarts, use `dayzserver.sh restart` in cron, as shown in the [Alternative Cron Configuration](#alternative-cron-configuration) section above.
 
-### Automatic restarts via cron
+### Scheduled restarts via cron
 
-Open the crontab:
+Scheduled restarts are handled by the script, not by RCon. Open the crontab:
 
 ```bash
 crontab -e
@@ -198,7 +209,9 @@ crontab -e
 Add a task to restart every 3 hours (00:00, 03:00, 06:00, ...):
 
 ```cron
-0 */3 * * * /usr/bin/bercon-cli --ip 127.0.0.1 --port 2306 --password 12345678 "#shutdown"
+0 */3 * * * /home/dayz/dayzserver.sh restart > /dev/null 2>&1
 ```
+
+The `restart` command stops the server gracefully, waits for the process to fully exit and for a short settle period (so Steam re-registers the server cleanly), then starts it again — applying any mod updates that `checkmods` flagged.
 
 > If needed, replace `/usr/bin/bercon-cli` with the path returned by the `which bercon-cli` command.
